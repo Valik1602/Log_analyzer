@@ -28,17 +28,21 @@
 
   /* ── layout ── */
   #app { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
-  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 8px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  header h1 { font-size: 1rem; font-weight: 600; white-space: nowrap; }
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 8px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; position: relative; }
+  .logo-mark { display: flex; align-items: center; gap: 8px; text-decoration: none; }
+  .logo-icon { width: 28px; height: 28px; flex-shrink: 0; }
+  .logo-text { display: flex; flex-direction: column; line-height: 1; }
+  .logo-text .brand { font-size: .6rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+  .logo-text .product { font-size: .92rem; font-weight: 700; white-space: nowrap; color: var(--text); letter-spacing: -.01em; }
   header .pill { font-size: .68rem; background: var(--accent); border-radius: 4px; padding: 2px 6px; white-space: nowrap; }
   #main { display: grid; grid-template-columns: 240px 1fr; overflow: hidden; }
   #sidebar { background: var(--surface); border-right: 1px solid var(--border); overflow-y: auto; padding: 12px 10px; display: flex; flex-direction: column; gap: 10px; }
   #content { overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
 
   /* ── global search bar ── */
-  #global-search { display: flex; align-items: center; gap: 6px; flex: 1; max-width: 600px; }
-  #global-q { flex: 1; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 5px 10px; font-size: .82rem; outline: none; font-family: inherit; }
-  #global-q:focus { border-color: var(--accent); }
+  #global-search { display: flex; align-items: center; gap: 8px; position: absolute; left: 50%; transform: translateX(-50%); width: min(640px, 55vw); }
+  #global-q { flex: 1; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 7px; padding: 8px 14px; font-size: .95rem; outline: none; font-family: inherit; }
+  #global-q:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(99,102,241,.2); }
   #global-q-type { font-size: .65rem; color: var(--text-muted); white-space: nowrap; background: var(--surface2); border: 1px solid var(--border); border-radius: 3px; padding: 2px 6px; }
   #global-q-type.t-uuid  { color: var(--sev-info);    border-color: rgba(59,130,246,.4); }
   #global-q-type.t-email { color: var(--sev-warning); border-color: rgba(245,158,11,.4); }
@@ -286,7 +290,18 @@
 <body>
 <div id="app">
   <header>
-    <h1>GKE Log Analyzer</h1>
+    <div class="logo-mark">
+      <svg class="logo-icon" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect width="28" height="28" rx="6" fill="#6366f1"/>
+        <path d="M7 10h14M7 14h10M7 18h12" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
+        <circle cx="21" cy="18" r="3.5" fill="#1a1d27" stroke="#a5b4fc" stroke-width="1.2"/>
+        <path d="M19.5 18h3M21 16.5v3" stroke="#a5b4fc" stroke-width="1.1" stroke-linecap="round"/>
+      </svg>
+      <div class="logo-text">
+        <span class="brand">UNS</span>
+        <span class="product">GKE Log Analyzer</span>
+      </div>
+    </div>
     <span class="pill">Local</span>
 
     <!-- Global search -->
