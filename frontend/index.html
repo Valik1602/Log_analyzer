@@ -1220,6 +1220,19 @@ document.getElementById('chain-rid-input').addEventListener('keydown', e => {
 });
 
 switchTab('logs');
+
+// ── restore session on refresh ─────────────────────────────────────────────
+(async () => {
+  try {
+    const data = await fetch(`${API}/summary`).then(r => r.ok ? r.json() : null).catch(() => null);
+    if (data && data.total > 0) {
+      await loadSummary();
+      await loadContainers();
+      showMainUI();
+      loadPage();
+    }
+  } catch (_) {}
+})();
 </script>
 </body>
 </html>
