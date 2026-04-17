@@ -61,7 +61,12 @@
 
   /* ── summary cards ── */
   .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; transition: border-color .15s, background .15s; }
+  .card.clickable { cursor: pointer; user-select: none; }
+  .card.clickable:hover { background: var(--surface2); border-color: var(--accent); }
+  .card.clickable.active { border-color: var(--accent); background: rgba(99,102,241,.08); }
+  .card.error.clickable.active { border-color: rgba(249,115,22,.5); background: rgba(249,115,22,.08); }
+  .card.warn.clickable.active  { border-color: rgba(245,158,11,.5); background: rgba(245,158,11,.08); }
   .card .label { font-size: .66rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .06em; }
   .card .value { font-size: 1.4rem; font-weight: 700; margin-top: 4px; }
   .card.error .value { color: var(--sev-error); }
@@ -356,9 +361,9 @@
       </div>
 
       <div class="cards" id="summary-cards" style="display:none">
-        <div class="card"><div class="label">Total Entries</div><div class="value" id="card-total">—</div></div>
-        <div class="card error"><div class="label">Errors</div><div class="value" id="card-errors">—</div></div>
-        <div class="card warn"><div class="label">Warnings</div><div class="value" id="card-warnings">—</div></div>
+        <div class="card clickable" id="card-total-wrap" onclick="cardFilter('all')" title="Show all entries"><div class="label">Total Entries</div><div class="value" id="card-total">—</div></div>
+        <div class="card error clickable" id="card-errors-wrap" onclick="cardFilter('errors')" title="Filter errors &amp; criticals"><div class="label">Errors</div><div class="value" id="card-errors">—</div></div>
+        <div class="card warn clickable" id="card-warnings-wrap" onclick="cardFilter('warnings')" title="Filter warnings"><div class="label">Warnings</div><div class="value" id="card-warnings">—</div></div>
         <div class="card info"><div class="label">Time Range</div><div class="value" id="card-range" style="font-size:.7rem;line-height:1.4">—</div></div>
       </div>
 
@@ -678,8 +683,51 @@ function resetFilters() {
   document.getElementById('filter-search').value = '';
   document.querySelectorAll('.sev-row[data-sev]').forEach(el =>
     el.className = el.className.replace(/\bactive-\S+/g, '').trim());
+  ['card-total-wrap','card-errors-wrap','card-warnings-wrap'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.classList.remove('active');
+  });
   updateContainerActiveState();
   state.filters = {}; state.page = 1; loadPage();
+}
+
+function cardFilter(type) {
+  const sel = document.getElementById('filter-severity');
+  const totalWrap    = document.getElementById('card-total-wrap');
+  const errorsWrap   = document.getElementById('card-errors-wrap');
+  const warningsWrap = document.getElementById('card-warnings-wrap');
+
+  // Determine if this card is already active (toggle off → show all)
+  const isActive = type === 'errors'   ? errorsWrap.classList.contains('active')
+                 : type === 'warnings' ? warningsWrap.classList.contains('active')
+                 : false;
+
+  // Reset all card active states
+  [totalWrap, errorsWrap, warningsWrap].forEach(el => el && el.classList.remove('active'));
+  Array.from(sel.options).forEach(o => o.selected = false);
+  document.querySelectorAll('.sev-row[data-sev]').forEach(el =>
+    el.className = el.className.replace(/\bactive-\S+/g, '').trim());
+
+  if (!isActive) {
+    if (type === 'errors') {
+      ['ERROR','CRITICAL'].forEach(s => {
+        const opt = Array.from(sel.options).find(o => o.value === s);
+        if (opt) opt.selected = true;
+        const row = document.querySelector(`.sev-row[data-sev="${s}"]`);
+        if (row) row.classList.add(`active-${s}`);
+      });
+      errorsWrap.classList.add('active');
+    } else if (type === 'warnings') {
+      const opt = Array.from(sel.options).find(o => o.value === 'WARNING');
+      if (opt) opt.selected = true;
+      const row = document.querySelector('.sev-row[data-sev="WARNING"]');
+      if (row) row.classList.add('active-WARNING');
+      warningsWrap.classList.add('active');
+    } else {
+      totalWrap.classList.add('active');
+    }
+  }
+
+  state.page = 1; applyFilters(); switchTab('logs');
 }
 
 function localToUTC(s) { return s ? new Date(s).toISOString() : ''; }
