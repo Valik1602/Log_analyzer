@@ -1,0 +1,1155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GKE Log Analyzer</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #252836;
+    --border: #2e3147;
+    --text: #e2e8f0;
+    --text-muted: #8892a4;
+    --accent: #6366f1;
+    --accent-hover: #818cf8;
+    --sev-critical: #ef4444;
+    --sev-error:    #f97316;
+    --sev-warning:  #f59e0b;
+    --sev-info:     #3b82f6;
+    --sev-debug:    #6b7280;
+    --sev-default:  #6b7280;
+  }
+
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+  /* ── layout ── */
+  #app { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 8px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  header h1 { font-size: 1rem; font-weight: 600; white-space: nowrap; }
+  header .pill { font-size: .68rem; background: var(--accent); border-radius: 4px; padding: 2px 6px; white-space: nowrap; }
+  #main { display: grid; grid-template-columns: 240px 1fr; overflow: hidden; }
+  #sidebar { background: var(--surface); border-right: 1px solid var(--border); overflow-y: auto; padding: 12px 10px; display: flex; flex-direction: column; gap: 10px; }
+  #content { overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+
+  /* ── global search bar ── */
+  #global-search { display: flex; align-items: center; gap: 6px; flex: 1; max-width: 600px; }
+  #global-q { flex: 1; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 5px 10px; font-size: .82rem; outline: none; font-family: inherit; }
+  #global-q:focus { border-color: var(--accent); }
+  #global-q-type { font-size: .65rem; color: var(--text-muted); white-space: nowrap; background: var(--surface2); border: 1px solid var(--border); border-radius: 3px; padding: 2px 6px; }
+  #global-q-type.t-uuid  { color: var(--sev-info);    border-color: rgba(59,130,246,.4); }
+  #global-q-type.t-email { color: var(--sev-warning); border-color: rgba(245,158,11,.4); }
+  #global-q-type.t-text  { color: var(--text-muted); }
+
+  /* ── upload ── */
+  #upload-zone { border: 2px dashed var(--border); border-radius: 8px; padding: 22px 12px; text-align: center; cursor: pointer; transition: border-color .2s, background .2s; }
+  #upload-zone:hover, #upload-zone.drag { border-color: var(--accent); background: rgba(99,102,241,.08); }
+  #upload-zone svg { display: block; margin: 0 auto 6px; opacity: .4; }
+  #upload-zone p { color: var(--text-muted); font-size: .78rem; }
+  #upload-zone p strong { color: var(--text); }
+  #file-input { display: none; }
+  #progress-bar-wrap { background: var(--surface2); border-radius: 4px; height: 5px; overflow: hidden; display: none; }
+  #progress-bar { height: 100%; background: var(--accent); width: 0%; transition: width .3s; }
+  #progress-label { font-size: .7rem; color: var(--text-muted); text-align: center; }
+
+  /* ── summary cards ── */
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .card .label { font-size: .66rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .06em; }
+  .card .value { font-size: 1.4rem; font-weight: 700; margin-top: 4px; }
+  .card.error .value { color: var(--sev-error); }
+  .card.warn  .value { color: var(--sev-warning); }
+  .card.info  .value { color: var(--sev-info); }
+
+  /* ── sidebar ── */
+  .side-section h3 { font-size: .64rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 5px; }
+  .sev-bar { display: flex; flex-direction: column; gap: 3px; }
+  .sev-row { display: flex; align-items: center; gap: 5px; font-size: .71rem; padding: 3px 4px; border-radius: 4px; border: 1px solid transparent; cursor: pointer; transition: background .15s, border-color .15s; user-select: none; }
+  .sev-row:hover { background: var(--surface2); }
+  .sev-row .name { min-width: 60px; }
+  .sev-row .bar-wrap { flex: 1; height: 5px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+  .sev-row .bar-fill { height: 100%; border-radius: 3px; }
+  .sev-row .count { min-width: 32px; text-align: right; font-size: .66rem; color: var(--text-muted); }
+  .sev-row.active-CRITICAL { background: rgba(239,68,68,.12);  border-color: rgba(239,68,68,.4); }
+  .sev-row.active-ERROR    { background: rgba(249,115,22,.12); border-color: rgba(249,115,22,.4); }
+  .sev-row.active-WARNING  { background: rgba(245,158,11,.12); border-color: rgba(245,158,11,.4); }
+  .sev-row.active-INFO     { background: rgba(59,130,246,.12); border-color: rgba(59,130,246,.4); }
+  .sev-row.active-DEBUG    { background: rgba(107,114,128,.12); border-color: rgba(107,114,128,.3); }
+  .container-list { display: flex; flex-direction: column; gap: 2px; max-height: 160px; overflow-y: auto; }
+  .container-list .c-item { font-size: .69rem; display: flex; justify-content: space-between; padding: 3px 5px; border-radius: 3px; border: 1px solid transparent; cursor: pointer; transition: background .15s; user-select: none; }
+  .container-list .c-item:hover { background: var(--surface2); }
+  .container-list .c-item.active { background: rgba(99,102,241,.14); border-color: rgba(99,102,241,.4); }
+  .container-list .c-item .c-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .container-list .c-item .c-cnt { color: var(--text-muted); margin-left: 4px; flex-shrink: 0; }
+
+  /* ── filters ── */
+  .filters { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; display: flex; flex-wrap: wrap; gap: 7px; align-items: flex-end; }
+  .filter-group { display: flex; flex-direction: column; gap: 3px; }
+  .filter-group label { font-size: .65rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .06em; }
+  input, select { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 4px 7px; font-size: .78rem; outline: none; }
+  input:focus, select:focus { border-color: var(--accent); }
+  select[multiple] { height: 62px; }
+  .btn { background: var(--accent); color: #fff; border: none; border-radius: 4px; padding: 5px 12px; font-size: .78rem; cursor: pointer; transition: background .15s; white-space: nowrap; }
+  .btn:hover { background: var(--accent-hover); }
+  .btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--text-muted); }
+  .btn.ghost:hover { border-color: var(--accent); color: var(--text); }
+  .btn.sm { padding: 3px 8px; font-size: .7rem; }
+  .btn.danger { background: rgba(239,68,68,.15); border: 1px solid rgba(239,68,68,.3); color: var(--sev-critical); }
+  .btn.danger:hover { background: rgba(239,68,68,.25); }
+
+  /* ── severity badge ── */
+  .sev { display: inline-block; font-size: .62rem; font-weight: 700; letter-spacing: .04em; padding: 2px 5px; border-radius: 3px; text-transform: uppercase; white-space: nowrap; }
+  .sev-CRITICAL { background: rgba(239,68,68,.18);  color: var(--sev-critical); }
+  .sev-ERROR    { background: rgba(249,115,22,.18); color: var(--sev-error); }
+  .sev-WARNING  { background: rgba(245,158,11,.18); color: var(--sev-warning); }
+  .sev-INFO     { background: rgba(59,130,246,.18); color: var(--sev-info); }
+  .sev-DEBUG    { background: rgba(107,114,128,.18); color: var(--sev-debug); }
+  .sev-DEFAULT  { background: rgba(107,114,128,.12); color: var(--sev-default); }
+
+  /* ── log table ── */
+  #table-wrap { overflow-x: auto; border-radius: 8px; border: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; font-size: .74rem; }
+  thead { background: var(--surface); position: sticky; top: 0; z-index: 2; }
+  th { padding: 7px 9px; text-align: left; color: var(--text-muted); font-weight: 600; font-size: .65rem; text-transform: uppercase; letter-spacing: .06em; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td { padding: 6px 9px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr.row:hover { background: var(--surface2); cursor: pointer; }
+  tr.row.selected { background: rgba(99,102,241,.14); }
+  .col-ts     { white-space: nowrap; font-family: monospace; font-size: .67rem; color: var(--text-muted); min-width: 135px; }
+  .col-sev    { white-space: nowrap; }
+  .col-cont   { white-space: nowrap; }
+  .col-logger { font-size: .67rem; color: var(--text-muted); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .col-action { font-size: .67rem; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .col-msg    { min-width: 220px; max-width: 400px; }
+  .col-rid    { font-family: monospace; font-size: .65rem; color: var(--text-muted); white-space: nowrap; }
+  .container-tag { font-size: .64rem; background: var(--surface2); border: 1px solid var(--border); border-radius: 3px; padding: 1px 4px; white-space: nowrap; }
+  .msg-text { word-break: break-word; white-space: pre-wrap; line-height: 1.4; }
+  .msg-scope { margin-top: 3px; font-size: .65rem; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: 3px; }
+  .msg-scope-tag { background: var(--surface2); border-radius: 3px; padding: 1px 4px; border: 1px solid var(--border); }
+  .msg-exc { margin-top: 3px; font-size: .68rem; color: #fca5a5; background: rgba(239,68,68,.07); border-left: 2px solid var(--sev-error); padding: 3px 6px; border-radius: 0 3px 3px 0; word-break: break-word; }
+
+  /* ── pagination ── */
+  .pagination { display: flex; gap: 6px; align-items: center; font-size: .74rem; color: var(--text-muted); }
+  .pagination button { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 3px 9px; cursor: pointer; font-size: .74rem; }
+  .pagination button:hover { border-color: var(--accent); }
+  .pagination button:disabled { opacity: .35; cursor: default; }
+
+  /* ── tabs ── */
+  .tabs { display: flex; gap: 1px; border-bottom: 1px solid var(--border); }
+  .tab { padding: 6px 14px; font-size: .78rem; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-muted); transition: color .15s; white-space: nowrap; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  #view-tabs { display: none; }
+  #view-tabs.visible { display: flex; }
+
+  /* ── detail panel ── */
+  #detail-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: none; }
+  #detail-panel.open { display: block; }
+  .panel-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--surface2); flex-wrap: wrap; gap: 6px; }
+  .panel-header h3 { font-size: .8rem; }
+  .panel-actions { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+  #detail-json { padding: 10px 12px; font-family: monospace; font-size: .69rem; white-space: pre-wrap; word-break: break-all; color: #a8c7fa; max-height: 280px; overflow-y: auto; }
+
+  /* ── chain timeline ── */
+  #chain-view { display: none; }
+  #chain-view.open { display: block; }
+  .chain-search-bar { display: flex; gap: 6px; margin-bottom: 8px; }
+  .chain-search-bar input { flex: 1; max-width: 440px; font-family: monospace; font-size: .76rem; }
+  .chain-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .chain-title { font-size: .8rem; color: var(--text-muted); }
+  .chain-empty-hint { color: var(--text-muted); font-size: .8rem; line-height: 1.6; padding: 20px; text-align: center; border: 1px dashed var(--border); border-radius: 8px; }
+  .timeline { display: flex; flex-direction: column; }
+  .tl-item { display: grid; grid-template-columns: 140px 26px 1fr; }
+  .tl-left { display: flex; flex-direction: column; align-items: flex-end; padding: 5px 8px 5px 0; }
+  .tl-ts { font-family: monospace; font-size: .65rem; color: var(--text-muted); line-height: 1.3; text-align: right; }
+  .tl-cont { font-size: .61rem; color: var(--text-muted); text-align: right; margin-top: 2px; max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tl-spine { display: flex; flex-direction: column; align-items: center; }
+  .tl-dot { width: 12px; height: 12px; border-radius: 50%; margin-top: 7px; flex-shrink: 0; border: 2px solid var(--bg); }
+  .tl-dot-CRITICAL { background: var(--sev-critical); box-shadow: 0 0 8px rgba(239,68,68,.6); }
+  .tl-dot-ERROR    { background: var(--sev-error);    box-shadow: 0 0 6px rgba(249,115,22,.5); }
+  .tl-dot-WARNING  { background: var(--sev-warning); }
+  .tl-dot-INFO     { background: var(--sev-info); }
+  .tl-dot-DEBUG, .tl-dot-DEFAULT { background: var(--sev-debug); }
+  .tl-line { flex: 1; width: 2px; background: var(--border); min-height: 10px; }
+  .tl-right { padding: 4px 0 7px 10px; min-height: 38px; }
+  .tl-right-header { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-bottom: 2px; }
+  .tl-msg { font-size: .74rem; line-height: 1.4; word-break: break-word; color: var(--text); }
+  .tl-exc { margin-top: 3px; font-size: .68rem; color: #fca5a5; background: rgba(239,68,68,.07); border-left: 2px solid var(--sev-error); padding: 3px 6px; border-radius: 0 3px 3px 0; word-break: break-word; }
+  .tl-failed { background: rgba(239,68,68,.2); color: var(--sev-critical); font-size: .6rem; font-weight: 700; padding: 2px 5px; border-radius: 3px; }
+  .tl-delta { margin: 0 0 0 154px; font-size: .63rem; color: var(--text-muted); font-style: italic; padding: 1px 0; }
+  .tl-clickable { cursor: pointer; }
+  .tl-clickable:hover .tl-right { background: rgba(99,102,241,.06); border-radius: 4px; }
+
+  /* ── errors view ── */
+  #errors-view { display: none; }
+  #errors-view.open { display: block; }
+  .error-card { background: var(--surface); border: 1px solid rgba(249,115,22,.25); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
+  .error-card.critical { border-color: rgba(239,68,68,.35); }
+  .ec-header { background: rgba(249,115,22,.06); padding: 9px 12px; cursor: pointer; display: flex; gap: 7px; align-items: flex-start; flex-wrap: wrap; }
+  .error-card.critical .ec-header { background: rgba(239,68,68,.06); }
+  .ec-ts { font-family: monospace; font-size: .66rem; color: var(--text-muted); white-space: nowrap; padding-top: 1px; }
+  .ec-meta { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+  .ec-location { font-size: .67rem; color: var(--text-muted); }
+  .ec-message { font-size: .77rem; line-height: 1.4; word-break: break-word; margin-top: 2px; }
+  .ec-toggle { font-size: .68rem; color: var(--text-muted); white-space: nowrap; padding-top: 2px; flex-shrink: 0; }
+  .ec-body { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 7px; }
+  .ec-exception { background: rgba(239,68,68,.06); border: 1px solid rgba(239,68,68,.2); border-radius: 5px; padding: 7px 9px; }
+  .ec-exc-type { font-size: .7rem; font-weight: 600; color: var(--sev-critical); margin-bottom: 3px; }
+  .ec-exc-msg { font-size: .72rem; color: #fca5a5; margin-bottom: 4px; }
+  .ec-exc-stack { font-size: .65rem; color: var(--text-muted); white-space: pre-wrap; word-break: break-all; max-height: 150px; overflow-y: auto; border-top: 1px solid var(--border); padding-top: 4px; margin-top: 4px; }
+  .ec-scope { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  .ec-scope-label { font-size: .66rem; color: var(--text-muted); }
+  .ec-scope-tag { font-size: .65rem; background: var(--surface2); border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; }
+  .ec-rid { font-size: .7rem; color: var(--text-muted); }
+  .ec-rid a { color: var(--accent); cursor: pointer; font-family: monospace; font-size: .68rem; text-decoration: none; }
+  .ec-rid a:hover { color: var(--accent-hover); text-decoration: underline; }
+  .ec-ctx { border-top: 1px solid var(--border); padding: 6px 12px; display: none; }
+  .error-card.expanded .ec-ctx { display: block; }
+  .ctx-sep { font-size: .65rem; color: var(--text-muted); font-style: italic; padding: 3px 0; text-align: center; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); margin: 3px 0; }
+  .ctx-row { display: flex; gap: 7px; padding: 3px 0; font-size: .7rem; border-bottom: 1px solid var(--border); cursor: pointer; align-items: flex-start; }
+  .ctx-row:last-child { border-bottom: none; }
+  .ctx-row:hover { background: var(--surface2); border-radius: 3px; }
+  .ctx-ts { font-family: monospace; font-size: .64rem; color: var(--text-muted); white-space: nowrap; min-width: 140px; }
+  .ctx-msg { flex: 1; word-break: break-word; }
+
+  /* ── search results ── */
+  #search-view { display: none; }
+  #search-view.open { display: block; }
+  .sr-info { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 2px; }
+  .sr-info .sr-q { font-family: monospace; font-size: .82rem; color: var(--text); font-weight: 600; }
+  .sr-info .sr-count { font-size: .78rem; color: var(--text-muted); }
+  .sr-type-badge { font-size: .65rem; font-weight: 700; padding: 2px 7px; border-radius: 3px; text-transform: uppercase; }
+  .sr-type-uuid  { background: rgba(59,130,246,.15); color: var(--sev-info); border: 1px solid rgba(59,130,246,.3); }
+  .sr-type-email { background: rgba(245,158,11,.15); color: var(--sev-warning); border: 1px solid rgba(245,158,11,.3); }
+  .sr-type-text  { background: rgba(99,102,241,.15); color: var(--accent-hover); border: 1px solid rgba(99,102,241,.3); }
+  .sr-truncated { font-size: .7rem; color: var(--sev-warning); }
+
+  .sr-section { margin-bottom: 14px; }
+  .sr-section-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding-bottom: 5px; border-bottom: 1px solid var(--border); }
+  .sr-section-head h2 { font-size: .82rem; font-weight: 600; }
+  .sr-section-head .sr-badge { font-size: .65rem; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 1px 7px; color: var(--text-muted); }
+
+  /* event group cards */
+  .eg-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 6px; }
+  .eg-card.has-errors { border-color: rgba(249,115,22,.3); }
+  .eg-card.delivered { border-color: rgba(34,197,94,.3); }
+  .eg-header { padding: 9px 12px; cursor: pointer; display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; }
+  .eg-card.has-errors .eg-header { background: rgba(249,115,22,.05); }
+  .eg-card.delivered .eg-header { background: rgba(34,197,94,.05); }
+  .eg-id { font-family: monospace; font-size: .72rem; color: var(--accent-hover); word-break: break-all; flex: 1; }
+  .eg-type-tag { font-size: .62rem; background: var(--surface2); border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; color: var(--text-muted); white-space: nowrap; }
+  .eg-stats { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .eg-stat { font-size: .7rem; color: var(--text-muted); white-space: nowrap; }
+  .eg-stat strong { color: var(--text); }
+  .eg-err-badge { font-size: .65rem; background: rgba(249,115,22,.18); color: var(--sev-error); border-radius: 3px; padding: 1px 6px; font-weight: 700; }
+  .eg-ok-badge  { font-size: .65rem; background: rgba(34,197,94,.15); color: #4ade80; border-radius: 3px; padding: 1px 6px; font-weight: 700; }
+  .eg-toggle { font-size: .68rem; color: var(--text-muted); white-space: nowrap; flex-shrink: 0; padding-top: 2px; }
+  .eg-timeline { display: none; border-top: 1px solid var(--border); padding: 8px 12px; }
+  .eg-card.expanded .eg-timeline { display: block; }
+
+  /* search error list (Section B) */
+  .se-item { background: var(--surface); border: 1px solid rgba(249,115,22,.2); border-radius: 6px; padding: 9px 12px; margin-bottom: 6px; }
+  .se-item.critical { border-color: rgba(239,68,68,.3); }
+  .se-header { display: flex; gap: 6px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 5px; }
+  .se-loc { font-size: .68rem; color: var(--text-muted); }
+  .se-msg { font-size: .77rem; line-height: 1.4; word-break: break-word; margin-bottom: 4px; }
+  .se-root-cause { font-size: .71rem; color: #fca5a5; background: rgba(239,68,68,.08); border-left: 3px solid var(--sev-critical); padding: 4px 8px; border-radius: 0 4px 4px 0; margin-bottom: 4px; font-family: monospace; word-break: break-all; }
+  .se-stack-toggle { font-size: .68rem; color: var(--accent); cursor: pointer; background: none; border: none; padding: 0; }
+  .se-stack-toggle:hover { color: var(--accent-hover); }
+  .se-stack { display: none; margin-top: 5px; font-size: .65rem; font-family: monospace; white-space: pre-wrap; word-break: break-all; color: var(--text-muted); background: var(--surface2); border-radius: 4px; padding: 7px; max-height: 200px; overflow-y: auto; }
+  .se-stack.open { display: block; }
+  .se-rid-link { font-size: .68rem; color: var(--text-muted); margin-top: 4px; }
+  .se-rid-link a { color: var(--accent); cursor: pointer; font-family: monospace; font-size: .67rem; }
+
+  /* error summary (Section C) */
+  .esc-row { display: flex; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .esc-row:last-child { border-bottom: none; }
+  .esc-type { flex: 1; font-size: .74rem; font-family: monospace; word-break: break-all; color: #fca5a5; }
+  .esc-bar-wrap { width: 80px; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; flex-shrink: 0; }
+  .esc-bar-fill { height: 100%; background: var(--sev-error); border-radius: 3px; }
+  .esc-count { font-size: .72rem; color: var(--text-muted); white-space: nowrap; min-width: 28px; text-align: right; }
+
+  /* ── misc ── */
+  .empty { text-align: center; padding: 32px; color: var(--text-muted); font-size: .82rem; }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .toast { position: fixed; bottom: 16px; right: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px 13px; font-size: .76rem; z-index: 999; box-shadow: 0 4px 20px rgba(0,0,0,.4); animation: fadeIn .2s; }
+  .toast.error { border-color: var(--sev-error); color: var(--sev-error); }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; } }
+  a-link { color: var(--accent); cursor: pointer; text-decoration: none; }
+  a-link:hover { color: var(--accent-hover); text-decoration: underline; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>GKE Log Analyzer</h1>
+    <span class="pill">Local</span>
+
+    <!-- Global search -->
+    <div id="global-search">
+      <input type="text" id="global-q"
+             placeholder="Search: ExternalEventId, email, RequestId, QueueMessageId…"
+             autocomplete="off" spellcheck="false">
+      <span id="global-q-type"></span>
+      <button class="btn sm" onclick="globalSearch()">Search</button>
+    </div>
+
+    <span id="header-stats" style="font-size:.71rem;color:var(--text-muted);margin-left:auto;white-space:nowrap"></span>
+  </header>
+
+  <div id="main">
+    <!-- Sidebar -->
+    <div id="sidebar">
+      <div id="upload-zone">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <p><strong>Drop JSON log file</strong></p>
+        <p>or click to browse</p>
+      </div>
+      <input type="file" id="file-input" accept=".json,.ndjson,.jsonl,.log">
+      <div id="progress-bar-wrap"><div id="progress-bar"></div></div>
+      <div id="progress-label"></div>
+
+      <div class="side-section" id="sev-section" style="display:none">
+        <h3>Severity</h3>
+        <div class="sev-bar" id="sev-bars"></div>
+      </div>
+      <div class="side-section" id="containers-section" style="display:none">
+        <h3>Containers</h3>
+        <div class="container-list" id="containers-list"></div>
+      </div>
+      <div id="errors-btn-wrap" style="display:none">
+        <button class="btn" style="width:100%" onclick="switchTab('errors')">View Errors &amp; Context</button>
+      </div>
+    </div>
+
+    <!-- Content -->
+    <div id="content">
+      <div id="placeholder" class="empty">
+        <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="margin:0 auto 10px;opacity:.3">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+        </svg>
+        Upload a GKE JSON log file to get started
+      </div>
+
+      <div class="cards" id="summary-cards" style="display:none">
+        <div class="card"><div class="label">Total Entries</div><div class="value" id="card-total">—</div></div>
+        <div class="card error"><div class="label">Errors</div><div class="value" id="card-errors">—</div></div>
+        <div class="card warn"><div class="label">Warnings</div><div class="value" id="card-warnings">—</div></div>
+        <div class="card info"><div class="label">Time Range</div><div class="value" id="card-range" style="font-size:.7rem;line-height:1.4">—</div></div>
+      </div>
+
+      <div class="tabs" id="view-tabs">
+        <div class="tab active" onclick="switchTab('logs')">Log Entries</div>
+        <div class="tab" onclick="switchTab('chain')">Chain View</div>
+        <div class="tab" onclick="switchTab('errors')">Errors</div>
+        <div class="tab" id="search-tab" onclick="switchTab('search')" style="display:none">🔍 Search Results</div>
+      </div>
+
+      <!-- ── Log Entries ── -->
+      <div id="logs-view">
+        <div class="filters" id="filters" style="display:none">
+          <div class="filter-group">
+            <label>Severity</label>
+            <select multiple id="filter-severity">
+              <option value="CRITICAL">CRITICAL</option>
+              <option value="ERROR">ERROR</option>
+              <option value="WARNING">WARNING</option>
+              <option value="INFO">INFO</option>
+              <option value="DEBUG">DEBUG</option>
+            </select>
+          </div>
+          <div class="filter-group">
+            <label>Container</label>
+            <select id="filter-container"><option value="">All</option></select>
+          </div>
+          <div class="filter-group">
+            <label>From</label>
+            <input type="datetime-local" id="filter-from" step="1">
+          </div>
+          <div class="filter-group">
+            <label>To</label>
+            <input type="datetime-local" id="filter-to" step="1">
+          </div>
+          <div class="filter-group" style="flex:1;min-width:140px">
+            <label>Search message</label>
+            <input type="text" id="filter-search" placeholder="keyword…" style="width:100%">
+          </div>
+          <button class="btn" onclick="applyFilters()">Apply</button>
+          <button class="btn ghost" onclick="resetFilters()">Reset</button>
+        </div>
+
+        <div id="table-wrap" style="display:none">
+          <table>
+            <thead>
+              <tr>
+                <th>Timestamp</th><th>Severity</th><th>Container</th>
+                <th>Logger</th><th>Action</th>
+                <th style="min-width:240px">Message / Exception / Scope</th>
+                <th>Request ID</th>
+              </tr>
+            </thead>
+            <tbody id="log-tbody"></tbody>
+          </table>
+        </div>
+
+        <div class="pagination" id="pagination" style="display:none">
+          <button id="pg-prev" onclick="changePage(-1)" disabled>← Prev</button>
+          <span id="pg-info"></span>
+          <button id="pg-next" onclick="changePage(1)">Next →</button>
+          <span style="margin-left:auto">Page size:
+            <select onchange="changePageSize(this.value)">
+              <option value="50">50</option><option value="100">100</option><option value="200">200</option>
+            </select>
+          </span>
+        </div>
+
+        <div id="detail-panel">
+          <div class="panel-header">
+            <h3 id="detail-title">Entry Detail</h3>
+            <div class="panel-actions">
+              <button class="btn sm" id="trace-btn" onclick="traceChain()" style="display:none">Trace Request Chain →</button>
+              <span id="no-rid-msg" style="display:none;font-size:.7rem;color:var(--text-muted);font-style:italic">No RequestId on this entry</span>
+              <button class="btn ghost sm" onclick="closeDetail()">✕ Close</button>
+            </div>
+          </div>
+          <pre id="detail-json"></pre>
+        </div>
+      </div>
+
+      <!-- ── Chain View ── -->
+      <div id="chain-view">
+        <div class="chain-search-bar">
+          <input type="text" id="chain-rid-input" placeholder="Enter Request ID or Connection ID and press Enter…">
+          <button class="btn sm" onclick="chainSearch()">Load Chain</button>
+        </div>
+        <div class="chain-header">
+          <span class="chain-title" id="chain-title"></span>
+          <button class="btn ghost sm" onclick="clearChain()" id="chain-clear" style="display:none">Clear</button>
+        </div>
+        <div class="timeline" id="chain-timeline">
+          <div class="chain-empty-hint">
+            Click any row in the <strong>Log Entries</strong> tab, then click <strong>Trace Request Chain</strong> —
+            or enter a Request ID above.
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Errors View ── -->
+      <div id="errors-view">
+        <div id="errors-container"></div>
+      </div>
+
+      <!-- ── Search Results View ── -->
+      <div id="search-view">
+        <div id="sr-info-bar" class="sr-info" style="display:none"></div>
+
+        <!-- Section A: Event Timeline -->
+        <div class="sr-section" id="sr-section-a" style="display:none">
+          <div class="sr-section-head">
+            <h2>A — Event Timeline</h2>
+            <span class="sr-badge" id="sr-a-badge">0 groups</span>
+          </div>
+          <div id="sr-events"></div>
+        </div>
+
+        <!-- Section B: What Failed? -->
+        <div class="sr-section" id="sr-section-b" style="display:none">
+          <div class="sr-section-head">
+            <h2>B — What Failed?</h2>
+            <span class="sr-badge" id="sr-b-badge">0 errors</span>
+          </div>
+          <div id="sr-errors"></div>
+        </div>
+
+        <!-- Section C: Failure Reason Summary -->
+        <div class="sr-section" id="sr-section-c" style="display:none">
+          <div class="sr-section-head">
+            <h2>C — Failure Reason Summary</h2>
+            <span class="sr-badge" id="sr-c-badge">0 types</span>
+          </div>
+          <div id="sr-summary"></div>
+        </div>
+
+        <div id="sr-empty" class="empty" style="display:none">No matching entries found.</div>
+      </div>
+
+    </div><!-- /content -->
+  </div><!-- /main -->
+</div>
+
+<script>
+const API = 'http://127.0.0.1:8000';
+
+let state = {
+  page: 1, pageSize: 50, totalEntries: 0,
+  filters: {}, selectedIdx: null, currentTab: 'logs',
+};
+let errorsLoaded = false;
+
+// ── upload ─────────────────────────────────────────────────────────────────
+
+const uploadZone = document.getElementById('upload-zone');
+const fileInput  = document.getElementById('file-input');
+uploadZone.addEventListener('click', () => fileInput.click());
+uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag'); });
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag'));
+uploadZone.addEventListener('drop', e => { e.preventDefault(); uploadZone.classList.remove('drag'); if (e.dataTransfer.files[0]) doUpload(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) doUpload(fileInput.files[0]); });
+
+async function doUpload(file) {
+  errorsLoaded = false;
+  setProgress(true, 'Uploading…');
+  const fd = new FormData();
+  fd.append('file', file);
+  let pct = 0;
+  const iv = setInterval(() => { pct = Math.min(pct + 2.5, 85); document.getElementById('progress-bar').style.width = pct + '%'; }, 120);
+  try {
+    const res = await fetch(`${API}/upload`, { method: 'POST', body: fd });
+    clearInterval(iv);
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    document.getElementById('progress-bar').style.width = '100%';
+    setProgress(false);
+    toast(`Loaded ${data.total.toLocaleString()} entries${data.skipped ? ` (${data.skipped} skipped)` : ''}`);
+    await loadSummary();
+    await loadContainers();
+    showMainUI();
+    loadPage();
+  } catch (e) {
+    clearInterval(iv);
+    setProgress(false);
+    toast('Upload failed: ' + e.message, true);
+  }
+}
+
+function setProgress(visible, label) {
+  document.getElementById('progress-bar-wrap').style.display = visible ? 'block' : 'none';
+  document.getElementById('progress-label').textContent = label || '';
+  if (!visible) document.getElementById('progress-bar').style.width = '0%';
+}
+
+// ── summary ────────────────────────────────────────────────────────────────
+
+async function loadSummary() {
+  let data;
+  try { data = await fetch(`${API}/summary`).then(r => r.json()); }
+  catch (e) { toast('Failed to load summary: ' + e.message, true); return; }
+  document.getElementById('card-total').textContent = (data.total || 0).toLocaleString();
+  const errors   = (data.severity_counts?.ERROR || 0) + (data.severity_counts?.CRITICAL || 0);
+  const warnings = data.severity_counts?.WARNING || 0;
+  document.getElementById('card-errors').textContent   = errors.toLocaleString();
+  document.getElementById('card-warnings').textContent = warnings.toLocaleString();
+  if (data.time_min && data.time_max) {
+    // Use textContent for the individual text nodes to prevent XSS from
+    // log-derived timestamp strings.
+    const f = ts => escHtml(ts.replace('T',' ').slice(0,19).replace('+00:00','Z'));
+    document.getElementById('card-range').innerHTML =
+      `<span style="font-size:.6rem">${f(data.time_min)}<br>→ ${f(data.time_max)}</span>`;
+  }
+  document.getElementById('header-stats').textContent = `${(data.total||0).toLocaleString()} entries · ${errors} errors`;
+
+  const sevOrder  = ['CRITICAL','ERROR','WARNING','INFO','DEBUG'];
+  const sevColors = { CRITICAL:'var(--sev-critical)', ERROR:'var(--sev-error)', WARNING:'var(--sev-warning)', INFO:'var(--sev-info)', DEBUG:'var(--sev-debug)' };
+  const maxVal = Math.max(...Object.values(data.severity_counts || {}), 1);
+  const bars = document.getElementById('sev-bars');
+  bars.innerHTML = '';
+  for (const sev of sevOrder) {
+    const cnt = data.severity_counts?.[sev] || 0;
+    if (!cnt) continue;
+    const pct = (cnt / maxVal * 100).toFixed(1);
+    bars.innerHTML += `<div class="sev-row" data-sev="${sev}" onclick="toggleSevFilter('${sev}')">
+      <span class="name"><span class="sev sev-${sev}">${sev}</span></span>
+      <div class="bar-wrap"><div class="bar-fill" style="width:${pct}%;background:${sevColors[sev]||'#6b7280'}"></div></div>
+      <span class="count">${cnt.toLocaleString()}</span>
+    </div>`;
+  }
+  document.getElementById('sev-section').style.display = 'block';
+}
+
+// ── containers ─────────────────────────────────────────────────────────────
+
+async function loadContainers() {
+  let data;
+  try { data = await fetch(`${API}/summary`).then(r => r.json()); }
+  catch (e) { toast('Failed to load containers: ' + e.message, true); return; }
+  const containers = data.containers || {};
+  const list = document.getElementById('containers-list');
+  const sel  = document.getElementById('filter-container');
+  list.innerHTML = '';
+  sel.innerHTML  = '<option value="">All</option>';
+  for (const [name, cnt] of Object.entries(containers)) {
+    list.innerHTML += `<div class="c-item" data-container="${escAttr(name)}" onclick="toggleContainerFilter('${escAttr(name)}')"><span class="c-name">${escHtml(name)}</span><span class="c-cnt">${cnt}</span></div>`;
+    sel.innerHTML  += `<option value="${escAttr(name)}">${escHtml(name)}</option>`;
+  }
+  if (Object.keys(containers).length) document.getElementById('containers-section').style.display = 'block';
+}
+
+// ── show main UI ───────────────────────────────────────────────────────────
+
+function showMainUI() {
+  document.getElementById('placeholder').style.display   = 'none';
+  document.getElementById('summary-cards').style.display = 'grid';
+  document.getElementById('view-tabs').classList.add('visible');
+  document.getElementById('filters').style.display      = 'flex';
+  document.getElementById('table-wrap').style.display   = 'block';
+  document.getElementById('pagination').style.display   = 'flex';
+  document.getElementById('errors-btn-wrap').style.display = 'block';
+}
+
+// ── tabs ───────────────────────────────────────────────────────────────────
+
+function switchTab(tab) {
+  state.currentTab = tab;
+  const names = ['logs','chain','errors','search'];
+  document.querySelectorAll('.tab').forEach((el, i) => el.classList.toggle('active', names[i] === tab));
+  document.getElementById('logs-view').style.display  = tab === 'logs'   ? 'block' : 'none';
+  document.getElementById('chain-view').classList.toggle('open', tab === 'chain');
+  document.getElementById('errors-view').classList.toggle('open', tab === 'errors');
+  document.getElementById('search-view').classList.toggle('open', tab === 'search');
+  if (tab === 'errors') loadErrors();
+}
+
+// ── filters ────────────────────────────────────────────────────────────────
+
+function applyFilters() {
+  const sevSel = document.getElementById('filter-severity');
+  state.filters = {
+    severity:  Array.from(sevSel.selectedOptions).map(o => o.value),
+    container: document.getElementById('filter-container').value,
+    timeFrom:  localToUTC(document.getElementById('filter-from').value),
+    timeTo:    localToUTC(document.getElementById('filter-to').value),
+    search:    document.getElementById('filter-search').value,
+  };
+  state.page = 1;
+  loadPage();
+}
+
+function toggleSevFilter(sev) {
+  const sel = document.getElementById('filter-severity');
+  const opt = Array.from(sel.options).find(o => o.value === sev);
+  if (opt) opt.selected = !opt.selected;
+  const row = document.querySelector(`.sev-row[data-sev="${sev}"]`);
+  if (row) row.classList.toggle(`active-${sev}`, opt ? opt.selected : false);
+  state.page = 1; applyFilters(); switchTab('logs');
+}
+
+function toggleContainerFilter(name) {
+  const sel = document.getElementById('filter-container');
+  sel.value = sel.value === name ? '' : name;
+  updateContainerActiveState();
+  state.page = 1; applyFilters(); switchTab('logs');
+}
+
+function updateContainerActiveState() {
+  const active = document.getElementById('filter-container').value;
+  document.querySelectorAll('.c-item').forEach(el =>
+    el.classList.toggle('active', el.dataset.container === active && active !== ''));
+}
+
+function resetFilters() {
+  document.getElementById('filter-severity').selectedIndex = -1;
+  document.getElementById('filter-container').value = '';
+  document.getElementById('filter-from').value = '';
+  document.getElementById('filter-to').value   = '';
+  document.getElementById('filter-search').value = '';
+  document.querySelectorAll('.sev-row[data-sev]').forEach(el =>
+    el.className = el.className.replace(/\bactive-\S+/g, '').trim());
+  updateContainerActiveState();
+  state.filters = {}; state.page = 1; loadPage();
+}
+
+function localToUTC(s) { return s ? new Date(s).toISOString() : ''; }
+
+// ── log table ──────────────────────────────────────────────────────────────
+
+async function loadPage() {
+  const tbody = document.getElementById('log-tbody');
+  tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:18px;color:var(--text-muted)"><span class="spinner"></span> Loading…</td></tr>';
+  const params = new URLSearchParams({ page: state.page, page_size: state.pageSize });
+  if (state.filters.container) params.set('container', state.filters.container);
+  if (state.filters.timeFrom)  params.set('timeFrom',  state.filters.timeFrom);
+  if (state.filters.timeTo)    params.set('timeTo',    state.filters.timeTo);
+  if (state.filters.search)    params.set('search',    state.filters.search);
+  (state.filters.severity || []).forEach(s => params.append('severity', s));
+  let data;
+  try { data = await fetch(`${API}/entries?${params}`).then(r => r.json()); }
+  catch (e) {
+    tbody.innerHTML = `<tr><td colspan="7" class="empty" style="color:var(--sev-error)">Failed to load entries: ${escHtml(e.message)}</td></tr>`;
+    return;
+  }
+  state.totalEntries = data.total;
+  renderTable(data.entries);
+  renderPagination(data.total, data.page, data.page_size);
+}
+
+function renderTable(entries) {
+  const tbody = document.getElementById('log-tbody');
+  if (!entries.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty">No matching entries</td></tr>'; return; }
+  tbody.innerHTML = entries.map(e => {
+    const rawSev = (e.severity || 'DEFAULT').toUpperCase();
+    const sev    = ['CRITICAL','ERROR','WARNING','INFO','DEBUG'].includes(rawSev) ? rawSev : 'DEFAULT';
+    const ts     = fmtTs(e.timestamp);
+    const logger = e.logger ? e.logger.split('.').pop() : '';
+    const msgParts = [`<div class="msg-text">${escHtml(e.message || '')}</div>`];
+    if (e.scope?.length) {
+      msgParts.push(`<div class="msg-scope">${e.scope.map(s => `<span class="msg-scope-tag">${escHtml(String(s))}</span>`).join('')}</div>`);
+    }
+    const exc = e.exception_message || e.exception || '';
+    if (exc) {
+      const label = e.exception_type ? `<strong>${escHtml(e.exception_type)}:</strong> ` : '';
+      msgParts.push(`<div class="msg-exc">${label}${escHtml(exc.slice(0,280))}${exc.length>280?'…':''}</div>`);
+    }
+    const sel = state.selectedIdx === e.idx ? ' selected' : '';
+    return `<tr class="row${sel}" data-idx="${e.idx}" onclick="selectEntry(${e.idx})">
+      <td class="col-ts">${escHtml(ts)}</td>
+      <td class="col-sev"><span class="sev sev-${sev}">${sev}</span></td>
+      <td class="col-cont">${e.container ? `<span class="container-tag">${escHtml(e.container)}</span>` : ''}</td>
+      <td class="col-logger" title="${escAttr(e.logger||'')}">${escHtml(logger)}</td>
+      <td class="col-action" title="${escAttr(e.action||'')}">${escHtml(e.action||'')}</td>
+      <td class="col-msg">${msgParts.join('')}</td>
+      <td class="col-rid">${escHtml(e.request_id||'')}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderPagination(total, page, pageSize) {
+  const pages = Math.ceil(total / pageSize);
+  document.getElementById('pg-prev').disabled = page <= 1;
+  document.getElementById('pg-next').disabled = page >= pages || total === 0;
+  if (total === 0) {
+    document.getElementById('pg-info').textContent = '0 entries';
+  } else {
+    document.getElementById('pg-info').textContent =
+      `${((page-1)*pageSize+1).toLocaleString()}–${Math.min(page*pageSize,total).toLocaleString()} of ${total.toLocaleString()}`;
+  }
+}
+function changePage(d) { state.page += d; loadPage(); }
+function changePageSize(v) { state.pageSize = parseInt(v); state.page = 1; loadPage(); }
+
+// ── entry detail ───────────────────────────────────────────────────────────
+
+async function selectEntry(idx) {
+  state.selectedIdx = idx;
+  document.querySelectorAll('tr.row').forEach(r => r.classList.toggle('selected', +r.dataset.idx === idx));
+  let data;
+  try { data = await fetch(`${API}/entry/${idx}`).then(r => r.json()); }
+  catch (e) { toast('Failed to load entry: ' + e.message, true); return; }
+  const rid = data.meta.request_id || data.meta.connection_id || '';
+  const traceBtn = document.getElementById('trace-btn');
+  const noRid    = document.getElementById('no-rid-msg');
+  traceBtn.style.display = rid ? 'inline-block' : 'none';
+  noRid.style.display    = rid ? 'none' : 'inline';
+  traceBtn.dataset.requestId    = data.meta.request_id    || '';
+  traceBtn.dataset.connectionId = data.meta.connection_id || '';
+  document.getElementById('detail-title').textContent =
+    `Entry #${idx} · ${data.meta.severity} · ${fmtTs(data.meta.timestamp)}`;
+  document.getElementById('detail-json').textContent = JSON.stringify(data.entry, null, 2);
+  document.getElementById('detail-panel').classList.add('open');
+}
+
+function closeDetail() {
+  document.getElementById('detail-panel').classList.remove('open');
+  state.selectedIdx = null;
+  document.querySelectorAll('tr.row').forEach(r => r.classList.remove('selected'));
+}
+
+// ── chain view ─────────────────────────────────────────────────────────────
+
+async function traceChain() {
+  const btn = document.getElementById('trace-btn');
+  const rid = btn.dataset.requestId || btn.dataset.connectionId;
+  if (!rid) { toast('No RequestId or ConnectionId on this entry', true); return; }
+  await loadChain(rid);
+  switchTab('chain');
+}
+
+async function loadChain(rid) {
+  document.getElementById('chain-title').textContent   = 'Loading…';
+  document.getElementById('chain-rid-input').value     = rid;
+  document.getElementById('chain-clear').style.display = 'inline-block';
+  let data;
+  try { data = await fetch(`${API}/chain/${encodeURIComponent(rid)}`).then(r => r.json()); }
+  catch (e) { toast('Failed to load chain: ' + e.message, true); document.getElementById('chain-title').textContent = ''; return; }
+  document.getElementById('chain-title').textContent =
+    data.total ? `${data.total} entries for Request ID: ${rid}` : `No entries found for: ${rid}`;
+  renderTimeline(data.entries, 'chain-timeline');
+}
+
+function renderTimeline(entries, containerId) {
+  const tl = document.getElementById(containerId);
+  if (!entries.length) { tl.innerHTML = '<div class="empty">No entries found for this chain</div>'; return; }
+  const errorSevs = new Set(['ERROR','CRITICAL']);
+  let firstErrIdx = entries.findIndex(e => errorSevs.has(e.severity));
+  let html = '';
+  for (let i = 0; i < entries.length; i++) {
+    const e   = entries[i];
+    // Whitelist severity to known values so it is safe to use as a CSS class suffix.
+    const rawSev = (e.severity || 'DEFAULT').toUpperCase();
+    const sev = ['CRITICAL','ERROR','WARNING','INFO','DEBUG'].includes(rawSev) ? rawSev : 'DEFAULT';
+    const ts  = fmtTs(e.timestamp);
+    if (i > 0) html += `<div class="tl-delta">${timeDelta(entries[i-1].timestamp, e.timestamp)}</div>`;
+    // Guard against absent stack_trace (may be "" or undefined from the API).
+    const excText = e.exception_message || (e.stack_trace ? e.stack_trace.split('\n')[0] : '') || '';
+    const excHtml = excText ? `<div class="tl-exc">${e.exception_type ? `<strong>${escHtml(e.exception_type)}:</strong> ` : ''}${escHtml(excText.slice(0,200))}</div>` : '';
+    // escHtml before splitting on ' ' so that log-derived timestamps cannot
+    // inject HTML through the .replace(' ','<br>') substitution.
+    const tsSafe = escHtml(ts).replace(' ','<br>');
+    html += `<div class="tl-item tl-clickable" onclick="selectEntry(${e.idx})">
+      <div class="tl-left">
+        <span class="tl-ts">${tsSafe}</span>
+        ${e.container ? `<span class="tl-cont">${escHtml(e.container)}</span>` : ''}
+      </div>
+      <div class="tl-spine">
+        <div class="tl-dot tl-dot-${sev}"></div>
+        ${i < entries.length-1 ? '<div class="tl-line"></div>' : ''}
+      </div>
+      <div class="tl-right">
+        <div class="tl-right-header">
+          <span class="sev sev-${sev}">${sev}</span>
+          ${e.action ? `<span style="font-size:.65rem;color:var(--text-muted)">${escHtml(e.action)}</span>` : ''}
+          ${i === firstErrIdx ? '<span class="tl-failed">FAILED HERE</span>' : ''}
+        </div>
+        <div class="tl-msg">${escHtml(e.message||'')}</div>
+        ${excHtml}
+      </div>
+    </div>`;
+  }
+  tl.innerHTML = html;
+}
+
+function clearChain() {
+  document.getElementById('chain-timeline').innerHTML =
+    '<div class="chain-empty-hint">Click any row in the <strong>Log Entries</strong> tab, then click <strong>Trace Request Chain</strong> — or enter a Request ID above.</div>';
+  document.getElementById('chain-title').textContent   = '';
+  document.getElementById('chain-clear').style.display = 'none';
+  document.getElementById('chain-rid-input').value     = '';
+}
+
+function chainSearch() {
+  const rid = document.getElementById('chain-rid-input').value.trim();
+  if (!rid) { toast('Enter a Request ID or Connection ID', true); return; }
+  loadChainAndSwitch(rid);
+}
+
+async function loadChainAndSwitch(rid) {
+  await loadChain(rid);
+  switchTab('chain');
+}
+
+// ── errors view ────────────────────────────────────────────────────────────
+
+async function loadErrors() {
+  if (errorsLoaded) return;
+  const container = document.getElementById('errors-container');
+  container.innerHTML = '<div class="empty"><span class="spinner"></span> Loading…</div>';
+  let data;
+  try { data = await fetch(`${API}/errors?context_size=5`).then(r => r.json()); }
+  catch (e) { container.innerHTML = `<div class="empty" style="color:var(--sev-error)">Failed to load errors: ${escHtml(e.message)}</div>`; return; }
+  errorsLoaded = true;
+  if (!data.errors.length) { container.innerHTML = '<div class="empty">No ERROR or CRITICAL entries found.</div>'; return; }
+  container.innerHTML = data.errors.map((item, i) => {
+    const rawSev = (item.error.severity || 'DEFAULT').toUpperCase();
+    const e = item.error, sev = ['CRITICAL','ERROR','WARNING','INFO','DEBUG'].includes(rawSev) ? rawSev : 'DEFAULT';
+    const location = [e.container, e.pod, e.logger].filter(Boolean).join(' · ');
+    const scope = (e.scope||[]).map(s => `<span class="ec-scope-tag">${escHtml(String(s))}</span>`).join('');
+    let excBlock = '';
+    if (e.exception || e.exception_message || e.exception_type) {
+      const stack = e.exception && e.exception !== e.exception_message
+        ? `<pre class="ec-exc-stack">${escHtml(e.exception)}</pre>` : '';
+      excBlock = `<div class="ec-exception">
+        ${e.exception_type    ? `<div class="ec-exc-type">${escHtml(e.exception_type)}</div>` : ''}
+        ${e.exception_message ? `<div class="ec-exc-msg">${escHtml(e.exception_message)}</div>` : ''}
+        ${stack}
+      </div>`;
+    }
+    const ridLink = e.request_id
+      ? `<div class="ec-rid">Request ID: <a onclick="loadChainAndSwitch('${escAttr(e.request_id)}')">${escHtml(e.request_id)}</a></div>` : '';
+    const ctxCount = item.context_before.length + item.context_after.length;
+    return `<div class="error-card${sev==='CRITICAL'?' critical':''}" id="err-${i}">
+      <div class="ec-header" onclick="toggleError(${i})">
+        <span class="sev sev-${sev}">${sev}</span>
+        <span class="ec-ts">${escHtml(fmtTs(e.timestamp))}</span>
+        <div class="ec-meta">
+          ${location ? `<div class="ec-location">${escHtml(location)}</div>` : ''}
+          <div class="ec-message">${escHtml(e.message||'')}</div>
+        </div>
+        <span class="ec-toggle">▶ Show context (${ctxCount})</span>
+      </div>
+      <div class="ec-body">
+        ${excBlock}
+        ${scope ? `<div class="ec-scope"><span class="ec-scope-label">Scope:</span>${scope}</div>` : ''}
+        ${ridLink}
+      </div>
+      <div class="ec-ctx" id="err-ctx-${i}">
+        ${item.context_before.map(c => ctxRow(c)).join('')}
+        <div class="ctx-sep">▲ before ──── ERROR ──── after ▼</div>
+        ${item.context_after.map(c => ctxRow(c)).join('')}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function ctxRow(e) {
+  const rawSev = (e.severity || 'DEFAULT').toUpperCase();
+  const sev = ['CRITICAL','ERROR','WARNING','INFO','DEBUG'].includes(rawSev) ? rawSev : 'DEFAULT';
+  return `<div class="ctx-row" onclick="selectEntry(${e.idx})">
+    <span class="ctx-ts">${escHtml(fmtTs(e.timestamp))}</span>
+    <span class="sev sev-${sev}" style="flex-shrink:0">${sev}</span>
+    <span class="ctx-msg">${escHtml((e.message||'').slice(0,180))}</span>
+  </div>`;
+}
+
+function toggleError(i) {
+  const card = document.getElementById(`err-${i}`);
+  card.classList.toggle('expanded');
+  card.querySelector('.ec-toggle').textContent =
+    card.classList.contains('expanded') ? '▼ Hide context' : '▶ Show context';
+}
+
+// ── global search ──────────────────────────────────────────────────────────
+
+const UUID_RE  = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const EMAIL_RE = /[^@\s]+@[^@\s]+\.[^@\s]+/;
+
+document.getElementById('global-q').addEventListener('input', function() {
+  const v = this.value.trim();
+  const badge = document.getElementById('global-q-type');
+  if (!v) { badge.textContent = ''; badge.className = ''; return; }
+  if (UUID_RE.test(v))  { badge.textContent = 'UUID';  badge.className = 'sr-type-badge t-uuid'; }
+  else if (EMAIL_RE.test(v)) { badge.textContent = 'Email'; badge.className = 'sr-type-badge t-email'; }
+  else                  { badge.textContent = 'Text';  badge.className = 'sr-type-badge t-text'; }
+});
+
+document.getElementById('global-q').addEventListener('keydown', e => {
+  if (e.key === 'Enter') globalSearch();
+});
+
+async function globalSearch() {
+  const q = document.getElementById('global-q').value.trim();
+  if (!q) { toast('Enter a search term', true); return; }
+
+  // Show search tab + spinner (innerHTML replacement tears down old child nodes,
+  // so we do not need to individually hide them first).
+  document.getElementById('search-tab').style.display = 'block';
+  document.getElementById('search-view').innerHTML =
+    '<div class="empty"><span class="spinner"></span> Searching\u2026</div>';
+  switchTab('search');
+
+  try {
+    const data = await fetch(`${API}/search?q=${encodeURIComponent(q)}`).then(r => r.json());
+    renderSearchResults(data);
+  } catch (e) {
+    document.getElementById('search-view').innerHTML =
+      `<div class="empty" style="color:var(--sev-error)">Search failed: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function renderSearchResults(data) {
+  // Rebuild the search-view content (it was replaced with spinner)
+  const sv = document.getElementById('search-view');
+  sv.innerHTML = `
+    <div id="sr-info-bar" class="sr-info"></div>
+    <div class="sr-section" id="sr-section-a">
+      <div class="sr-section-head"><h2>A — Event Timeline</h2><span class="sr-badge" id="sr-a-badge"></span></div>
+      <div id="sr-events"></div>
+    </div>
+    <div class="sr-section" id="sr-section-b">
+      <div class="sr-section-head"><h2>B — What Failed?</h2><span class="sr-badge" id="sr-b-badge"></span></div>
+      <div id="sr-errors"></div>
+    </div>
+    <div class="sr-section" id="sr-section-c">
+      <div class="sr-section-head"><h2>C — Failure Reason Summary</h2><span class="sr-badge" id="sr-c-badge"></span></div>
+      <div id="sr-summary"></div>
+    </div>
+    <div id="sr-empty" class="empty" style="display:none">No matching entries found for this query.</div>
+  `;
+
+  // Info bar
+  const typeClass = { uuid: 't-uuid', email: 't-email', text: 't-text' }[data.query_type] || 't-text';
+  const typeLabel = { uuid: 'UUID', email: 'Email', text: 'Text' }[data.query_type] || 'Text';
+  document.getElementById('sr-info-bar').innerHTML = `
+    <span class="sr-type-badge ${typeClass}">${typeLabel}</span>
+    <span class="sr-q">${escHtml(data.query)}</span>
+    <span class="sr-count">${data.total.toLocaleString()} matching entries</span>
+    ${data.truncated ? '<span class="sr-truncated">⚠ Results capped at 2,000 entries</span>' : ''}
+    ${data.query_type === 'email' ? '<span style="font-size:.68rem;color:var(--text-muted)">— searched all jsonPayload fields</span>' : ''}
+  `;
+
+  if (data.total === 0) {
+    document.getElementById('sr-empty').style.display = 'block';
+    return;
+  }
+
+  // Section A
+  const groups = data.event_groups || [];
+  document.getElementById('sr-a-badge').textContent = `${groups.length} group${groups.length !== 1 ? 's' : ''}`;
+  if (groups.length) {
+    document.getElementById('sr-events').innerHTML = groups.map((g, i) => renderEventGroup(g, i)).join('');
+  } else {
+    document.getElementById('sr-events').innerHTML = '<div style="font-size:.78rem;color:var(--text-muted);padding:8px 0">No ExternalEventId / QueueMessageId grouping available</div>';
+  }
+
+  // Section B
+  const errors = data.errors || [];
+  document.getElementById('sr-b-badge').textContent = `${errors.length} error${errors.length !== 1 ? 's' : ''}`;
+  if (errors.length) {
+    document.getElementById('sr-errors').innerHTML = errors.slice(0, 100).map((err, i) => renderSearchError(err, i)).join('');
+  } else {
+    document.getElementById('sr-errors').innerHTML = '<div style="font-size:.78rem;color:var(--text-muted);padding:8px 0">No errors found in matched entries ✓</div>';
+  }
+
+  // Section C
+  const summary = data.error_summary || [];
+  document.getElementById('sr-c-badge').textContent = `${summary.length} type${summary.length !== 1 ? 's' : ''}`;
+  if (summary.length) {
+    const maxCount = summary[0].count;
+    document.getElementById('sr-summary').innerHTML = `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 12px">` +
+      summary.map(s => `
+        <div class="esc-row">
+          <div class="esc-type">${escHtml(s.exception_type)}</div>
+          <div class="esc-bar-wrap"><div class="esc-bar-fill" style="width:${(s.count/maxCount*100).toFixed(1)}%"></div></div>
+          <div class="esc-count">× ${s.count}</div>
+        </div>
+      `).join('') + `</div>`;
+  } else {
+    document.getElementById('sr-summary').innerHTML = '<div style="font-size:.78rem;color:var(--text-muted);padding:8px 0">No exception types identified</div>';
+  }
+}
+
+// Keyed store for event-group entries: avoids embedding raw JSON in onclick
+// attributes, which is an XSS vector when log data contains quotes or HTML.
+const _egEntries = new Map();
+
+function renderEventGroup(g, i) {
+  // Store entries in the JS Map — never embed them in HTML attributes.
+  _egEntries.set(i, g.entries);
+
+  const hasErrors   = g.error_count > 0;
+  const cls = hasErrors ? 'has-errors' : 'delivered';
+  const dur = g.duration_ms != null ? fmtDuration(g.duration_ms) : '';
+  const statusBadge = hasErrors
+    ? `<span class="eg-err-badge">&#x2717; ${g.error_count} error${g.error_count !== 1 ? 's' : ''}</span>`
+    : `<span class="eg-ok-badge">&#x2713; OK</span>`;
+
+  const tlId = `eg-tl-${i}`;
+
+  return `<div class="eg-card ${cls}" id="eg-${i}">
+    <div class="eg-header" onclick="toggleEventGroup(${i}, '${escAttr(tlId)}')">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+          <span class="eg-type-tag">${escHtml(g.group_type)}</span>
+          ${statusBadge}
+          <span class="eg-stat"><strong>${g.total}</strong> entries</span>
+          ${dur ? `<span class="eg-stat">&#x23F1; ${dur}</span>` : ''}
+        </div>
+        <div class="eg-id">${escHtml(g.group_id)}</div>
+        ${g.start_time ? `<div style="font-size:.63rem;color:var(--text-muted);margin-top:3px">${escHtml(fmtTs(g.start_time))} &#x2192; ${escHtml(fmtTs(g.end_time))}</div>` : ''}
+      </div>
+      <span class="eg-toggle">&#x25B6; Expand</span>
+    </div>
+    <div class="eg-timeline" id="${tlId}"></div>
+  </div>`;
+}
+
+function toggleEventGroup(i, tlId) {
+  const card    = document.getElementById(`eg-${i}`);
+  const tl      = document.getElementById(tlId);
+  const isOpen  = card.classList.toggle('expanded');
+  card.querySelector('.eg-toggle').textContent = isOpen ? '\u25BC Collapse' : '\u25B6 Expand';
+  if (isOpen && !tl.dataset.rendered) {
+    tl.dataset.rendered = '1';
+    renderTimeline(_egEntries.get(i) || [], tlId);
+  }
+}
+
+function renderSearchError(err, i) {
+  const rawSev   = (err.severity || 'DEFAULT').toUpperCase();
+  const sev      = ['CRITICAL','ERROR','WARNING','INFO','DEBUG'].includes(rawSev) ? rawSev : 'DEFAULT';
+  const location = [err.container, err.pod, err.logger].filter(Boolean).join(' · ');
+  const hasStack = !!err.stack_trace;
+  const stackId  = `se-stack-${i}`;
+
+  const ridLink = err.request_id
+    ? `<div class="se-rid-link">Request ID: <a onclick="loadChainAndSwitch('${escAttr(err.request_id)}')">${escHtml(err.request_id)}</a></div>`
+    : (err.external_event_id
+        ? `<div class="se-rid-link">ExternalEventId: <span style="font-family:monospace;font-size:.67rem">${escHtml(err.external_event_id)}</span></div>`
+        : '');
+
+  return `<div class="se-item${sev==='CRITICAL'?' critical':''}">
+    <div class="se-header">
+      <span class="sev sev-${sev}">${sev}</span>
+      <span class="se-loc">${escHtml(fmtTs(err.timestamp))}</span>
+      ${location ? `<span class="se-loc">${escHtml(location)}</span>` : ''}
+    </div>
+    <div class="se-msg">${escHtml(err.message||'')}</div>
+    ${err.root_cause ? `<div class="se-root-cause">${escHtml(err.root_cause)}</div>` : ''}
+    ${hasStack ? `<button class="se-stack-toggle" onclick="toggleStack('${stackId}', this)">▶ Show stack trace</button>
+      <pre class="se-stack" id="${stackId}">${escHtml(err.stack_trace)}</pre>` : ''}
+    ${ridLink}
+  </div>`;
+}
+
+function toggleStack(id, btn) {
+  const el = document.getElementById(id);
+  el.classList.toggle('open');
+  btn.textContent = el.classList.contains('open') ? '▼ Hide stack trace' : '▶ Show stack trace';
+}
+
+// ── utils ──────────────────────────────────────────────────────────────────
+
+function fmtTs(ts) {
+  if (!ts) return '';
+  return ts.replace('T',' ').slice(0,23).replace('+00:00','').replace('Z','');
+}
+
+function fmtDuration(ms) {
+  if (ms < 1000)  return `${ms}ms`;
+  if (ms < 60000) return `${(ms/1000).toFixed(2)}s`;
+  const m = Math.floor(ms/60000), s = ((ms%60000)/1000).toFixed(0);
+  return `${m}m ${s}s`;
+}
+
+function timeDelta(ts1, ts2) {
+  if (!ts1 || !ts2) return '';
+  const ms = new Date(ts2) - new Date(ts1);
+  if (isNaN(ms) || ms < 0) return '';
+  return fmtDuration(ms).replace(/^/, '+');
+}
+
+function escHtml(str) {
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escAttr(str) {
+  // Must escape & first to avoid double-encoding subsequent replacements.
+  return String(str)
+    .replace(/&/g,'&amp;')
+    .replace(/'/g,'&#39;')
+    .replace(/"/g,'&quot;');
+}
+function toast(msg, isError) {
+  const el = document.createElement('div');
+  el.className = 'toast' + (isError ? ' error' : '');
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+// ── wire-ups ───────────────────────────────────────────────────────────────
+
+document.getElementById('chain-rid-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') chainSearch();
+});
+
+switchTab('logs');
+</script>
+</body>
+</html>
