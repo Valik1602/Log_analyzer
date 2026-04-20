@@ -325,6 +325,14 @@
   .esc-bar-fill { height: 100%; background: var(--sev-error); border-radius: 3px; }
   .esc-count { font-size: .72rem; color: var(--text-muted); white-space: nowrap; min-width: 28px; text-align: right; }
 
+  /* ── export dropdown ── */
+  .export-wrap { position: relative; display: inline-block; }
+  .export-dropdown { position: absolute; top: calc(100% + 4px); right: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.5); min-width: 160px; z-index: 200; overflow: hidden; display: none; }
+  .export-dropdown.open { display: block; }
+  .export-dropdown button { display: block; width: 100%; text-align: left; padding: 8px 14px; font-size: .78rem; background: none; border: none; color: var(--text); cursor: pointer; transition: background .12s; font-family: inherit; }
+  .export-dropdown button:hover { background: var(--surface2); }
+  .export-dropdown hr { border: none; border-top: 1px solid var(--border); margin: 2px 0; }
+
   /* ── manager summary ── */
   #mgr-summary-btn-wrap { display: none; margin-top: 4px; }
   #mgr-summary-btn { display: flex; align-items: center; gap: 6px; font-size: .78rem; }
@@ -474,6 +482,14 @@
           </div>
           <button class="btn" onclick="applyFilters()">Apply</button>
           <button class="btn ghost" onclick="resetFilters()">Reset</button>
+          <div class="export-wrap" id="export-wrap">
+            <button class="btn ghost" onclick="toggleExportDropdown(event)">Export ▾</button>
+            <div class="export-dropdown" id="export-dropdown">
+              <button onclick="startExport('txt')">Export as .txt</button>
+              <button onclick="startExport('csv')">Export as .csv</button>
+              <button onclick="startExport('json')">Export as .json</button>
+            </div>
+          </div>
         </div>
 
         <div id="table-wrap" style="display:none">
@@ -1320,6 +1336,122 @@ function toast(msg, isError) {
   el.textContent = msg;
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 4000);
+}
+
+// ── export ─────────────────────────────────────────────────────────────────
+
+function toggleExportDropdown(e) {
+  e.stopPropagation();
+  document.getElementById('export-dropdown').classList.toggle('open');
+}
+
+document.addEventListener('click', () => {
+  document.getElementById('export-dropdown')?.classList.remove('open');
+});
+
+async function startExport(format) {
+  document.getElementById('export-dropdown').classList.remove('open');
+  toast('Fetching entries…');
+  let entries;
+  try { entries = await fetchAllFiltered(); }
+  catch(e) { toast('Export failed: ' + e.message, true); return; }
+  if (!entries.length) { toast('No entries to export', true); return; }
+
+  const filterDesc = buildFilterDesc();
+  const slug       = buildSlug(filterDesc);
+  const datePart   = new Date().toISOString().replace(/[-:T]/g,'').slice(0,12);
+  const base       = `logs_export${slug ? '_'+slug : ''}_${datePart}`;
+
+  if (format === 'txt')  downloadBlob(toTxt(entries, filterDesc),  base + '.txt',  'text/plain');
+  if (format === 'csv')  downloadBlob(toCsv(entries),              base + '.csv',  'text/csv');
+  if (format === 'json') downloadBlob(toJson(entries),             base + '.json', 'application/json');
+  toast(`Exported ${entries.length.toLocaleString()} entries as .${format}`);
+}
+
+async function fetchAllFiltered() {
+  const params = new URLSearchParams({ page: 1, page_size: 500 });
+  const f = state.filters;
+  if (f.container) params.set('container', f.container);
+  if (f.timeFrom)  params.set('timeFrom',  f.timeFrom);
+  if (f.timeTo)    params.set('timeTo',    f.timeTo);
+  if (f.search)    params.set('search',    f.search);
+  (f.severity || []).forEach(s => params.append('severity', s));
+
+  const first = await fetch(`${API}/entries?${params}`).then(r => r.json());
+  const all   = [...first.entries];
+  const total = first.total;
+  const pages = Math.ceil(total / 500);
+  for (let p = 2; p <= pages; p++) {
+    params.set('page', p);
+    const d = await fetch(`${API}/entries?${params}`).then(r => r.json());
+    all.push(...d.entries);
+  }
+  return all;
+}
+
+function buildFilterDesc() {
+  const f = state.filters;
+  const parts = [];
+  if (f.search)              parts.push(`"${f.search}"`);
+  if (f.container)           parts.push(`container:${f.container}`);
+  if (f.severity?.length)    parts.push(`severity:${f.severity.join(',')}`);
+  if (f.timeFrom || f.timeTo) parts.push(`time:${fmtTs(f.timeFrom)||'start'}→${fmtTs(f.timeTo)||'end'}`);
+  return parts.join(' · ') || 'All entries';
+}
+
+function buildSlug(desc) {
+  return desc.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40);
+}
+
+function toTxt(entries, filterDesc) {
+  const hr  = '='.repeat(44);
+  const sep = '-'.repeat(44);
+  const now = new Date().toISOString().replace('T',' ').slice(0,16);
+  const lines = [
+    hr,
+    'GKE Log Analyzer — Export',
+    `Filter: ${filterDesc}`,
+    `Total entries: ${entries.length}`,
+    `Generated: ${now}`,
+    hr, '',
+  ];
+  entries.forEach(e => {
+    const ts  = fmtTs(e.timestamp) || e.timestamp || '—';
+    const sev = (e.severity || 'DEFAULT').padEnd(8);
+    const parts = [e.container, e.logger].filter(Boolean).join(' · ');
+    lines.push(`[${ts}] ${sev} | ${parts}`);
+    lines.push(`Message: ${e.message || '—'}`);
+    if (e.exception_type || e.exception_message) {
+      const ex = [e.exception_type, e.exception_message].filter(Boolean).join(': ');
+      lines.push(`Exception: ${ex}`);
+    }
+    if (e.stack_trace) lines.push(`Stack: ${e.stack_trace.split('\n')[0]}`);
+    lines.push(`RequestId: ${e.request_id || '—'}`);
+    if (e.external_event_id) lines.push(`ExternalEventId: ${e.external_event_id}`);
+    if (e.queue_message_id)  lines.push(`QueueMessageId: ${e.queue_message_id}`);
+    lines.push(sep, '');
+  });
+  return lines.join('\n');
+}
+
+function toCsv(entries) {
+  const cols = ['timestamp','severity','container','pod','logger','action','message',
+                'exception_type','exception_message','request_id','external_event_id','queue_message_id'];
+  const esc  = v => `"${String(v ?? '').replace(/"/g,'""')}"`;
+  return [cols.join(','), ...entries.map(e => cols.map(c => esc(e[c])).join(','))].join('\r\n');
+}
+
+function toJson(entries) {
+  return JSON.stringify(entries, null, 2);
+}
+
+function downloadBlob(content, filename, mime) {
+  const blob = new Blob([content], { type: mime });
+  const a    = document.createElement('a');
+  a.href     = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 // ── heatmap ────────────────────────────────────────────────────────────────
