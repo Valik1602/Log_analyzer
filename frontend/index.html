@@ -154,22 +154,36 @@
   #view-tabs { display: none; }
   #view-tabs.visible { display: flex; }
 
-  /* ── detail panel ── */
-  #detail-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: none; }
-  #detail-panel.open { display: block; }
-  .panel-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--surface2); flex-wrap: wrap; gap: 6px; }
-  .panel-header h3 { font-size: .8rem; }
-  .panel-actions { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
-  #detail-json { padding: 10px 12px; font-family: monospace; font-size: .69rem; white-space: pre-wrap; word-break: break-all; color: #a8c7fa; max-height: 280px; overflow-y: auto; }
+  /* ── detail drawer ── */
+  #detail-panel { position: fixed; top: 0; right: -440px; width: 420px; height: 100vh; background: var(--surface); border-left: 1px solid var(--border); z-index: 300; transition: right .22s cubic-bezier(.4,0,.2,1); display: flex; flex-direction: column; box-shadow: -6px 0 28px rgba(0,0,0,.5); overflow: hidden; }
+  #detail-panel.open { right: 0; }
+  .dp-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--surface2); flex-shrink: 0; }
+  .dp-header-left { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; }
+  .dp-ts { font-size: .71rem; color: var(--text-muted); font-family: monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dp-body { flex: 1; overflow-y: auto; padding: 8px 14px 12px; }
+  .dp-field { display: grid; grid-template-columns: 108px 1fr; gap: 6px; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: .74rem; }
+  .dp-field:last-of-type { border-bottom: none; }
+  .dp-label { color: var(--text-muted); font-size: .62rem; text-transform: uppercase; letter-spacing: .06em; padding-top: 2px; }
+  .dp-value { word-break: break-word; line-height: 1.45; }
+  .dp-mono  { font-family: monospace; font-size: .7rem; }
+  .dp-exc   { color: #fca5a5; font-size: .71rem; }
+  .dp-stack-toggle { font-size: .67rem; color: var(--accent); cursor: pointer; background: none; border: none; padding: 5px 0 2px; display: block; font-family: inherit; }
+  .dp-stack-toggle:hover { color: var(--accent-hover); }
+  .dp-stack { display: none; font-size: .63rem; font-family: monospace; white-space: pre-wrap; word-break: break-all; color: var(--text-muted); background: var(--surface2); border-radius: 4px; padding: 8px; margin: 3px 0 6px; max-height: 180px; overflow-y: auto; }
+  .dp-stack.open { display: block; }
+  .dp-trace-bar { padding: 10px 14px; border-top: 1px solid var(--border); background: rgba(99,102,241,.06); flex-shrink: 0; }
+  .dp-trace-btn { width: 100%; font-size: .8rem; padding: 8px 14px; }
 
   /* ── chain timeline ── */
   #chain-view { display: none; }
   #chain-view.open { display: block; }
   .chain-search-bar { display: flex; gap: 6px; margin-bottom: 8px; }
-  .chain-search-bar input { flex: 1; max-width: 440px; font-family: monospace; font-size: .76rem; }
-  .chain-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
-  .chain-title { font-size: .8rem; color: var(--text-muted); }
-  .chain-empty-hint { color: var(--text-muted); font-size: .8rem; line-height: 1.6; padding: 20px; text-align: center; border: 1px dashed var(--border); border-radius: 8px; }
+  .chain-search-bar input { flex: 1; font-family: monospace; font-size: .76rem; }
+  .chain-header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  .chain-title { font-size: .8rem; font-weight: 600; color: var(--text); }
+  .chain-empty-hint { color: var(--text-muted); font-size: .8rem; line-height: 1.7; padding: 24px 20px; text-align: center; background: var(--surface2); border-radius: 8px; }
+  .chain-quick-btns { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-top: 12px; }
+  .chain-quick-btn { font-family: monospace; font-size: .72rem; }
   .timeline { display: flex; flex-direction: column; }
   .tl-item { display: grid; grid-template-columns: 140px 26px 1fr; }
   .tl-left { display: flex; flex-direction: column; align-items: flex-end; padding: 5px 8px 5px 0; }
@@ -605,35 +619,20 @@
           </span>
         </div>
 
-        <div id="detail-panel">
-          <div class="panel-header">
-            <h3 id="detail-title">Entry Detail</h3>
-            <div class="panel-actions">
-              <button class="btn sm" id="trace-btn" onclick="traceChain()" style="display:none">Trace Request Chain →</button>
-              <span id="no-rid-msg" style="display:none;font-size:.7rem;color:var(--text-muted);font-style:italic">No RequestId on this entry</span>
-              <button class="btn ghost sm" onclick="closeDetail()">✕ Close</button>
-            </div>
-          </div>
-          <pre id="detail-json"></pre>
-        </div>
+        <div id="detail-panel"></div>
       </div>
 
       <!-- ── Chain View ── -->
       <div id="chain-view">
         <div class="chain-search-bar">
-          <input type="text" id="chain-rid-input" placeholder="Enter Request ID or Connection ID and press Enter…">
+          <input type="text" id="chain-rid-input" placeholder="Enter RequestId, ConnectionId, ExternalEventId or QueueMessageId…" onkeydown="if(event.key==='Enter')chainSearch()">
           <button class="btn sm" onclick="chainSearch()">Load Chain</button>
         </div>
         <div class="chain-header">
           <span class="chain-title" id="chain-title"></span>
           <button class="btn ghost sm" onclick="clearChain()" id="chain-clear" style="display:none">Clear</button>
         </div>
-        <div class="timeline" id="chain-timeline">
-          <div class="chain-empty-hint">
-            Click any row in the <strong>Log Entries</strong> tab, then click <strong>Trace Request Chain</strong> —
-            or enter a Request ID above.
-          </div>
-        </div>
+        <div class="timeline" id="chain-timeline"></div>
       </div>
 
       <!-- ── Errors View ── -->
@@ -856,6 +855,7 @@ function switchTab(tab) {
   document.getElementById('search-view').classList.toggle('open',   tab === 'search');
   if (tab === 'errors')  loadErrors();
   if (tab === 'heatmap') loadHeatmap();
+  if (tab === 'chain')   initChainView();
 }
 
 // ── filters ────────────────────────────────────────────────────────────────
@@ -1026,17 +1026,66 @@ async function selectEntry(idx) {
   let data;
   try { data = await fetch(`${API}/entry/${idx}`).then(r => r.json()); }
   catch (e) { toast('Failed to load entry: ' + e.message, true); return; }
-  const rid = data.meta.request_id || data.meta.connection_id || '';
-  const traceBtn = document.getElementById('trace-btn');
-  const noRid    = document.getElementById('no-rid-msg');
-  traceBtn.style.display = rid ? 'inline-block' : 'none';
-  noRid.style.display    = rid ? 'none' : 'inline';
-  traceBtn.dataset.requestId    = data.meta.request_id    || '';
-  traceBtn.dataset.connectionId = data.meta.connection_id || '';
-  document.getElementById('detail-title').textContent =
-    `Entry #${idx} · ${data.meta.severity} · ${fmtTs(data.meta.timestamp)}`;
-  document.getElementById('detail-json').textContent = JSON.stringify(data.entry, null, 2);
-  document.getElementById('detail-panel').classList.add('open');
+  const m = data.meta;
+  const rawSev = (m.severity || 'DEFAULT').toUpperCase();
+  const sev = ['CRITICAL','ERROR','WARNING','INFO','DEBUG'].includes(rawSev) ? rawSev : 'DEFAULT';
+
+  const traceId = m.request_id || m.connection_id || m.external_event_id || m.queue_message_id || '';
+
+  const fields = [
+    ['Severity',        `<span class="sev sev-${sev}">${sev}</span>`],
+    ['Timestamp',       `<span class="dp-mono">${escHtml(fmtTs(m.timestamp))}</span>`],
+    ['Container',       m.container],
+    ['Pod',             m.pod],
+    ['Logger',          m.logger],
+    ['Action',          m.action],
+    ['Message',         m.message ? `<span style="white-space:pre-wrap">${escHtml(m.message)}</span>` : ''],
+    ['RequestId',       m.request_id   ? `<span class="dp-mono">${escHtml(m.request_id)}</span>` : ''],
+    ['ConnectionId',    m.connection_id ? `<span class="dp-mono">${escHtml(m.connection_id)}</span>` : ''],
+    ['ExternalEventId', m.external_event_id ? `<span class="dp-mono">${escHtml(m.external_event_id)}</span>` : ''],
+    ['QueueMessageId',  m.queue_message_id  ? `<span class="dp-mono">${escHtml(m.queue_message_id)}</span>` : ''],
+    ['Insert ID',       m.insert_id ? `<span class="dp-mono">${escHtml(m.insert_id)}</span>` : ''],
+    ['Scope',           (m.scope||[]).length ? m.scope.map(s => `<span class="msg-scope-tag">${escHtml(String(s))}</span>`).join(' ') : ''],
+  ].filter(([, v]) => v);
+
+  let excHtml = '';
+  if (m.exception_type || m.exception_message) {
+    excHtml = `<div class="dp-field">
+      <span class="dp-label">Exception</span>
+      <span class="dp-value dp-exc">${m.exception_type ? `<strong>${escHtml(m.exception_type)}</strong><br>` : ''}${escHtml(m.exception_message || '')}</span>
+    </div>`;
+  }
+
+  const stackId = `dp-stack-${idx}`;
+  let stackHtml = '';
+  if (m.stack_trace) {
+    stackHtml = `<div class="dp-field" style="display:block;padding:5px 0">
+      <button class="dp-stack-toggle" onclick="toggleDpStack('${stackId}', this)">▶ Show stack trace</button>
+      <pre class="dp-stack" id="${stackId}">${escHtml(m.stack_trace)}</pre>
+    </div>`;
+  }
+
+  const traceBar = traceId ? `<div class="dp-trace-bar">
+    <button class="btn dp-trace-btn" onclick="traceFrom('${escAttr(traceId)}')">⟶ Trace Request Chain</button>
+  </div>` : '';
+
+  const panel = document.getElementById('detail-panel');
+  panel.innerHTML = `
+    <div class="dp-header">
+      <div class="dp-header-left">
+        <span class="sev sev-${sev}" style="flex-shrink:0">${sev}</span>
+        <span class="dp-ts">Entry #${idx} · ${escHtml(fmtTs(m.timestamp))}</span>
+      </div>
+      <button class="btn ghost sm" onclick="closeDetail()" style="flex-shrink:0">✕</button>
+    </div>
+    <div class="dp-body">
+      ${fields.map(([label, val]) => `<div class="dp-field"><span class="dp-label">${escHtml(label)}</span><span class="dp-value">${val}</span></div>`).join('')}
+      ${excHtml}
+      ${stackHtml}
+    </div>
+    ${traceBar}
+  `;
+  panel.classList.add('open');
 }
 
 function closeDetail() {
@@ -1045,14 +1094,48 @@ function closeDetail() {
   document.querySelectorAll('tr.row').forEach(r => r.classList.remove('selected'));
 }
 
+function toggleDpStack(id, btn) {
+  const el = document.getElementById(id);
+  el.classList.toggle('open');
+  btn.textContent = el.classList.contains('open') ? '▼ Hide stack trace' : '▶ Show stack trace';
+}
+
+function traceFrom(rid) {
+  closeDetail();
+  loadChain(rid);
+  switchTab('chain');
+}
+
 // ── chain view ─────────────────────────────────────────────────────────────
 
-async function traceChain() {
-  const btn = document.getElementById('trace-btn');
-  const rid = btn.dataset.requestId || btn.dataset.connectionId;
-  if (!rid) { toast('No RequestId or ConnectionId on this entry', true); return; }
-  await loadChain(rid);
-  switchTab('chain');
+function getChainEmptyHint() {
+  let quickBtns = '';
+  if (_errorsData && _errorsData.length) {
+    const rids = [];
+    for (const item of _errorsData) {
+      const e = item.error;
+      const id = e.request_id || e.connection_id || e.external_event_id || e.queue_message_id;
+      if (id && !rids.includes(id)) rids.push(id);
+      if (rids.length >= 3) break;
+    }
+    if (rids.length) {
+      quickBtns = `<div class="chain-quick-btns">
+        ${rids.map(id => `<button class="btn ghost sm chain-quick-btn" onclick="loadChain('${escAttr(id)}')">${escHtml(id.slice(0,18))}…</button>`).join('')}
+      </div>`;
+    }
+  }
+  return `<div class="chain-empty-hint">
+    Click any row in the <strong>Log Entries</strong> tab, then press <strong>Trace Request Chain</strong> —
+    or enter an ID above.${quickBtns ? '<br><span style="font-size:.72rem;color:var(--text-muted)">Recent IDs from errors:</span>' + quickBtns : ''}
+  </div>`;
+}
+
+function initChainView() {
+  const tl = document.getElementById('chain-timeline');
+  if (!tl.dataset.initialized) {
+    tl.innerHTML = getChainEmptyHint();
+    tl.dataset.initialized = '1';
+  }
 }
 
 async function loadChain(rid) {
@@ -1062,9 +1145,18 @@ async function loadChain(rid) {
   let data;
   try { data = await fetch(`${API}/chain/${encodeURIComponent(rid)}`).then(r => r.json()); }
   catch (e) { toast('Failed to load chain: ' + e.message, true); document.getElementById('chain-title').textContent = ''; return; }
+
+  if (!data.total) {
+    try {
+      const any = await fetch(`${API}/chain-any/${encodeURIComponent(rid)}`).then(r => r.json());
+      if (any.total) data = any;
+    } catch (_) { /* ignore */ }
+  }
+
+  const shortId = rid.length > 32 ? rid.slice(0,32) + '…' : rid;
   document.getElementById('chain-title').textContent =
-    data.total ? `${data.total} entries for Request ID: ${rid}` : `No entries found for: ${rid}`;
-  renderTimeline(data.entries, 'chain-timeline');
+    data.total ? `Request chain: ${shortId} — ${data.total} entries` : `No entries found for: ${shortId}`;
+  renderTimeline(data.entries || [], 'chain-timeline');
 }
 
 function renderTimeline(entries, containerId) {
@@ -1110,8 +1202,9 @@ function renderTimeline(entries, containerId) {
 }
 
 function clearChain() {
-  document.getElementById('chain-timeline').innerHTML =
-    '<div class="chain-empty-hint">Click any row in the <strong>Log Entries</strong> tab, then click <strong>Trace Request Chain</strong> — or enter a Request ID above.</div>';
+  const tl = document.getElementById('chain-timeline');
+  tl.innerHTML = getChainEmptyHint();
+  tl.dataset.initialized = '1';
   document.getElementById('chain-title').textContent   = '';
   document.getElementById('chain-clear').style.display = 'none';
   document.getElementById('chain-rid-input').value     = '';
