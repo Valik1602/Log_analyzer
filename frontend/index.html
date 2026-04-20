@@ -195,6 +195,50 @@
   /* ── errors view ── */
   #errors-view { display: none; }
   #errors-view.open { display: block; }
+  #heatmap-view { display: none; }
+  #heatmap-view.open { display: block; padding: 4px 0; }
+
+  /* ── heatmap ── */
+  .hm-wrap { overflow-x: auto; }
+  .hm-table { border-collapse: separate; border-spacing: 3px; }
+  .hm-table th { font-size: .57rem; color: var(--text-muted); padding: 0 1px 4px; text-align: center; font-weight: 400; width: 28px; }
+  .hm-table td.hm-day { font-size: .62rem; color: var(--text-muted); padding: 0 8px 0 0; white-space: nowrap; text-align: right; vertical-align: middle; }
+  .hm-cell { width: 28px; height: 22px; border-radius: 3px; cursor: default; transition: transform .12s; position: relative; }
+  .hm-cell:hover { transform: scale(1.35); z-index: 2; }
+  .hm-c0 { background: var(--surface2); }
+  .hm-c1 { background: rgba(245,158,11,.22); }
+  .hm-c2 { background: rgba(245,158,11,.55); }
+  .hm-c3 { background: rgba(245,158,11,.88); }
+  .hm-c4 { background: rgba(239,68,68,.82); }
+  .hm-legend { display: flex; align-items: center; gap: 6px; margin-top: 10px; font-size: .63rem; color: var(--text-muted); flex-wrap: wrap; }
+  .hm-lg { width: 14px; height: 14px; border-radius: 2px; flex-shrink: 0; }
+  .hm-stats { margin-top: 10px; font-size: .74rem; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: 20px; }
+  .hm-stats strong { color: var(--text); }
+  .hm-bar-chart { margin-top: 4px; }
+  .hm-bars { display: flex; align-items: flex-end; gap: 3px; height: 100px; }
+  .hm-bar { flex: 1; border-radius: 2px 2px 0 0; min-height: 2px; transition: opacity .15s; cursor: default; }
+  .hm-bar:hover { opacity: .75; }
+  .hm-bar-xlabels { display: flex; gap: 3px; margin-top: 3px; }
+  .hm-bar-xl { flex: 1; text-align: center; font-size: .54rem; color: var(--text-muted); }
+
+  /* ── pattern detection ── */
+  .patterns-wrap { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .patterns-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .patterns-head h3 { font-size: .8rem; font-weight: 600; flex: 1; }
+  .pat-card { border-radius: 7px; padding: 10px 13px; margin-bottom: 7px; border: 1px solid; }
+  .pat-card.recurring { background: rgba(245,158,11,.06); border-color: rgba(245,158,11,.3); }
+  .pat-card.burst     { background: rgba(239,68,68,.06);  border-color: rgba(239,68,68,.3); }
+  .pat-card.cascade   { background: rgba(239,68,68,.06);  border-color: rgba(239,68,68,.22); }
+  .pat-header { display: flex; align-items: center; gap: 8px; }
+  .pat-badge { font-size: .58rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
+  .pat-badge.recurring { background: rgba(245,158,11,.22); color: var(--sev-warning); }
+  .pat-badge.burst     { background: rgba(239,68,68,.18);  color: var(--sev-critical); }
+  .pat-badge.cascade   { background: rgba(239,68,68,.18);  color: var(--sev-critical); }
+  .pat-title { font-size: .77rem; font-weight: 600; flex: 1; word-break: break-word; }
+  .pat-desc  { font-size: .71rem; color: var(--text-muted); margin-top: 4px; line-height: 1.45; }
+  .pat-link  { font-size: .68rem; color: var(--accent); cursor: pointer; margin-top: 5px; display: inline-block; border: none; background: none; padding: 0; }
+  .pat-link:hover { color: var(--accent-hover); text-decoration: underline; }
+  .pat-cascade-chain { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 6px; }
   .error-card { background: var(--surface); border: 1px solid rgba(249,115,22,.25); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
   .error-card.critical { border-color: rgba(239,68,68,.35); }
   .ec-header { background: rgba(249,115,22,.06); padding: 9px 12px; cursor: pointer; display: flex; gap: 7px; align-items: flex-start; flex-wrap: wrap; }
@@ -395,6 +439,7 @@
         <div class="tab active" onclick="switchTab('logs')">Log Entries</div>
         <div class="tab" onclick="switchTab('chain')">Chain View</div>
         <div class="tab" onclick="switchTab('errors')">Errors</div>
+        <div class="tab" onclick="switchTab('heatmap')">Heatmap</div>
         <div class="tab" id="search-tab" onclick="switchTab('search')" style="display:none">🔍 Search Results</div>
       </div>
 
@@ -490,6 +535,18 @@
       <!-- ── Errors View ── -->
       <div id="errors-view">
         <div id="errors-container"></div>
+        <div id="patterns-section" class="patterns-wrap" style="display:none">
+          <div class="patterns-head">
+            <h3>Pattern Detection</h3>
+            <span class="sr-badge" id="patterns-badge">scanning…</span>
+          </div>
+          <div id="patterns-container"></div>
+        </div>
+      </div>
+
+      <!-- ── Heatmap View ── -->
+      <div id="heatmap-view">
+        <div id="heatmap-container"><div class="empty"><span class="spinner"></span> Loading…</div></div>
       </div>
 
       <!-- ── Search Results View ── -->
@@ -556,7 +613,9 @@ let state = {
   page: 1, pageSize: 50, totalEntries: 0,
   filters: {}, selectedIdx: null, currentTab: 'logs',
 };
-let errorsLoaded = false;
+let errorsLoaded  = false;
+let heatmapLoaded = false;
+let _errorsData   = null;
 
 // ── upload ─────────────────────────────────────────────────────────────────
 
@@ -569,7 +628,9 @@ uploadZone.addEventListener('drop', e => { e.preventDefault(); uploadZone.classL
 fileInput.addEventListener('change', () => { if (fileInput.files[0]) doUpload(fileInput.files[0]); });
 
 async function doUpload(file) {
-  errorsLoaded = false;
+  errorsLoaded  = false;
+  heatmapLoaded = false;
+  _errorsData   = null;
   setProgress(true, 'Uploading…');
   const fd = new FormData();
   fd.append('file', file);
@@ -673,13 +734,15 @@ function showMainUI() {
 
 function switchTab(tab) {
   state.currentTab = tab;
-  const names = ['logs','chain','errors','search'];
+  const names = ['logs','chain','errors','heatmap','search'];
   document.querySelectorAll('.tab').forEach((el, i) => el.classList.toggle('active', names[i] === tab));
-  document.getElementById('logs-view').style.display  = tab === 'logs'   ? 'block' : 'none';
-  document.getElementById('chain-view').classList.toggle('open', tab === 'chain');
-  document.getElementById('errors-view').classList.toggle('open', tab === 'errors');
-  document.getElementById('search-view').classList.toggle('open', tab === 'search');
-  if (tab === 'errors') loadErrors();
+  document.getElementById('logs-view').style.display  = tab === 'logs'    ? 'block' : 'none';
+  document.getElementById('chain-view').classList.toggle('open',   tab === 'chain');
+  document.getElementById('errors-view').classList.toggle('open',  tab === 'errors');
+  document.getElementById('heatmap-view').classList.toggle('open', tab === 'heatmap');
+  document.getElementById('search-view').classList.toggle('open',  tab === 'search');
+  if (tab === 'errors')  loadErrors();
+  if (tab === 'heatmap') loadHeatmap();
 }
 
 // ── filters ────────────────────────────────────────────────────────────────
@@ -962,6 +1025,7 @@ async function loadErrors() {
   try { data = await fetch(`${API}/errors?context_size=5`).then(r => r.json()); }
   catch (e) { container.innerHTML = `<div class="empty" style="color:var(--sev-error)">Failed to load errors: ${escHtml(e.message)}</div>`; return; }
   errorsLoaded = true;
+  _errorsData  = data.errors;
   if (!data.errors.length) { container.innerHTML = '<div class="empty">No ERROR or CRITICAL entries found.</div>'; return; }
   container.innerHTML = data.errors.map((item, i) => {
     const rawSev = (item.error.severity || 'DEFAULT').toUpperCase();
@@ -1003,6 +1067,7 @@ async function loadErrors() {
       </div>
     </div>`;
   }).join('');
+  renderPatterns(data.errors);
 }
 
 function ctxRow(e) {
@@ -1255,6 +1320,255 @@ function toast(msg, isError) {
   el.textContent = msg;
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 4000);
+}
+
+// ── heatmap ────────────────────────────────────────────────────────────────
+
+async function loadHeatmap() {
+  if (heatmapLoaded) return;
+  const wrap = document.getElementById('heatmap-container');
+  // Reuse already-loaded errors or fetch fresh
+  if (!_errorsData) {
+    wrap.innerHTML = '<div class="empty"><span class="spinner"></span> Loading…</div>';
+    try {
+      const d = await fetch(`${API}/errors?context_size=0`).then(r => r.json());
+      _errorsData = d.errors || [];
+    } catch(e) {
+      wrap.innerHTML = `<div class="empty" style="color:var(--sev-error)">Failed: ${escHtml(e.message)}</div>`;
+      return;
+    }
+  }
+  heatmapLoaded = true;
+  const errEntries = _errorsData.map(x => x.error);
+  if (!errEntries.length) { wrap.innerHTML = '<div class="empty">No ERROR/CRITICAL entries to display.</div>'; return; }
+
+  // Build grid[day 0-6][hour 0-23]  (day 0 = Mon)
+  const grid = Array.from({length:7}, () => new Array(24).fill(0));
+  const dates = new Set();
+  errEntries.forEach(e => {
+    if (!e.timestamp) return;
+    const d = new Date(e.timestamp);
+    const dow  = (d.getDay() + 6) % 7; // Mon=0 … Sun=6
+    const hour = d.getHours();
+    grid[dow][hour]++;
+    dates.add(e.timestamp.slice(0, 10));
+  });
+
+  // Single-day fallback → bar chart
+  if (dates.size <= 1) { wrap.innerHTML = renderHeatmapBars(grid, [...dates][0] || ''); return; }
+
+  // Compute hourly totals for stats
+  const hourTotals = Array.from({length:24}, (_,h) => grid.reduce((s,row) => s+row[h], 0));
+  const peakHour   = hourTotals.indexOf(Math.max(...hourTotals));
+  // Quietest 3-hour window
+  let minSum = Infinity, quietStart = 0;
+  for (let h = 0; h < 24; h++) {
+    const s = hourTotals[h] + hourTotals[(h+1)%24] + hourTotals[(h+2)%24];
+    if (s < minSum) { minSum = s; quietStart = h; }
+  }
+
+  const DAYS  = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const cellClass = n => n === 0 ? 'hm-c0' : n <= 5 ? 'hm-c1' : n <= 20 ? 'hm-c2' : n <= 50 ? 'hm-c3' : 'hm-c4';
+
+  let html = '<div class="hm-wrap"><table class="hm-table"><thead><tr><th></th>';
+  for (let h = 0; h < 24; h++) html += `<th>${String(h).padStart(2,'0')}</th>`;
+  html += '</tr></thead><tbody>';
+  DAYS.forEach((day, di) => {
+    html += `<tr><td class="hm-day">${day}</td>`;
+    for (let h = 0; h < 24; h++) {
+      const n = grid[di][h];
+      const tip = `${day} ${String(h).padStart(2,'0')}:00 — ${n} error${n!==1?'s':''}`;
+      html += `<td><div class="hm-cell ${cellClass(n)}" title="${escAttr(tip)}"></div></td>`;
+    }
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+
+  // Legend
+  html += `<div class="hm-legend">
+    <div class="hm-lg hm-c0"></div>0
+    <div class="hm-lg hm-c1"></div>1–5
+    <div class="hm-lg hm-c2"></div>6–20
+    <div class="hm-lg hm-c3"></div>21–50
+    <div class="hm-lg hm-c4"></div>51+
+  </div>`;
+
+  // Stats
+  const fmt = h => `${String(h).padStart(2,'0')}:00`;
+  html += `<div class="hm-stats">
+    <span>Peak hour: <strong>${fmt(peakHour)}–${fmt((peakHour+1)%24)}</strong> (${hourTotals[peakHour]} errors)</span>
+    <span>Quietest period: <strong>${fmt(quietStart)}–${fmt((quietStart+3)%24)}</strong></span>
+    <span>Days in log: <strong>${dates.size}</strong></span>
+  </div>`;
+
+  wrap.innerHTML = html;
+}
+
+function renderHeatmapBars(grid, date) {
+  const hourTotals = Array.from({length:24}, (_,h) => grid.reduce((s,row) => s+row[h], 0));
+  const maxVal = Math.max(...hourTotals, 1);
+  const barColor = n => n === 0 ? 'var(--surface2)' : n <= 5 ? 'rgba(245,158,11,.45)' : n <= 20 ? 'rgba(245,158,11,.8)' : 'rgba(239,68,68,.8)';
+
+  let html = `<div class="hm-bar-chart"><div style="font-size:.7rem;color:var(--text-muted);margin-bottom:6px">Hourly errors — ${escHtml(date)}</div>`;
+  html += '<div class="hm-bars">';
+  hourTotals.forEach((n, h) => {
+    const pct = Math.round((n / maxVal) * 100);
+    const tip = `${String(h).padStart(2,'0')}:00 — ${n} error${n!==1?'s':''}`;
+    html += `<div class="hm-bar" style="height:${Math.max(pct,2)}%;background:${barColor(n)}" title="${escAttr(tip)}"></div>`;
+  });
+  html += '</div><div class="hm-bar-xlabels">';
+  for (let h = 0; h < 24; h++) html += `<div class="hm-bar-xl">${h%3===0?String(h).padStart(2,'0'):''}</div>`;
+  html += '</div></div>';
+  return html;
+}
+
+// ── pattern detection ──────────────────────────────────────────────────────
+
+function renderPatterns(errorItems) {
+  const section   = document.getElementById('patterns-section');
+  const container = document.getElementById('patterns-container');
+  const badge     = document.getElementById('patterns-badge');
+  section.style.display = 'block';
+  container.innerHTML   = '<div class="empty" style="padding:8px 0"><span class="spinner"></span> Detecting patterns…</div>';
+
+  // Run async so it doesn't block error list rendering
+  setTimeout(() => {
+    const entries = errorItems.map(x => x.error).filter(e => e.timestamp);
+    const sorted  = [...entries].sort((a,b) => a.timestamp < b.timestamp ? -1 : 1);
+    const tsMsArr = sorted.map(e => new Date(e.timestamp).getTime());
+
+    const results = [
+      ...detectRecurring(sorted),
+      ...detectBursts(sorted, tsMsArr),
+      ...detectCascades(sorted, tsMsArr),
+    ];
+
+    badge.textContent = results.length ? `${results.length} pattern${results.length>1?'s':''} found` : 'no patterns found';
+    if (!results.length) {
+      container.innerHTML = '<div class="pat-empty">No recurring, burst, or cascade patterns detected.</div>';
+      return;
+    }
+    container.innerHTML = results.map(renderPatCard).join('');
+  }, 0);
+}
+
+function detectRecurring(sorted) {
+  // Group by normalized key
+  const groups = {};
+  sorted.forEach(e => {
+    const key = (e.exception_type || e.stack_trace?.split('\n')[0] || e.message || 'Unknown').slice(0, 90).trim();
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(e.timestamp);
+  });
+
+  const results = [];
+  Object.entries(groups).forEach(([key, tsList]) => {
+    if (tsList.length < 3) return;
+    const ms       = tsList.map(t => new Date(t).getTime());
+    const intervals = ms.slice(1).map((t,i) => t - ms[i]);
+    const mean     = intervals.reduce((a,b) => a+b, 0) / intervals.length;
+    if (mean < 10_000) return; // ignore sub-10s noise
+    const variance = intervals.reduce((a,b) => a + (b-mean)**2, 0) / intervals.length;
+    const cv       = Math.sqrt(variance) / mean;
+    if (cv > 0.45) return; // not regular enough
+
+    const avgSec = mean / 1000;
+    const humanInterval = avgSec >= 3600 ? `~${(avgSec/3600).toFixed(1)}h`
+                        : avgSec >= 60   ? `~${Math.round(avgSec/60)} min`
+                        :                  `~${Math.round(avgSec)} sec`;
+    results.push({ type: 'recurring', key, count: tsList.length, interval: humanInterval, first: tsList[0] });
+  });
+  return results.sort((a,b) => b.count - a.count).slice(0, 5);
+}
+
+function detectBursts(sorted, tsMsArr) {
+  const results = [];
+  let i = 0;
+  while (i < tsMsArr.length) {
+    let j = i;
+    while (j < tsMsArr.length && tsMsArr[j] - tsMsArr[i] < 60_000) j++;
+    const count = j - i;
+    if (count >= 5) {
+      const durationMs = tsMsArr[j-1] - tsMsArr[i];
+      results.push({
+        type: 'burst',
+        time: sorted[i].timestamp,
+        count,
+        durationSec: Math.round(durationMs / 1000),
+        tsFrom: sorted[i].timestamp,
+        tsTo:   sorted[j-1].timestamp,
+      });
+      i = j; // advance past this burst
+    } else {
+      i++;
+    }
+  }
+  return results.slice(0, 10);
+}
+
+function detectCascades(sorted, tsMsArr) {
+  const results = [];
+  let lastCascadeEnd = -Infinity;
+
+  for (let i = 0; i < sorted.length; i++) {
+    if (tsMsArr[i] < lastCascadeEnd) continue;
+    const window = [];
+    for (let j = i; j < sorted.length && tsMsArr[j] - tsMsArr[i] <= 30_000; j++) {
+      if (sorted[j].container) window.push(sorted[j]);
+    }
+    const seen = [], chain = [];
+    window.forEach(e => { if (e.container && !seen.includes(e.container)) { seen.push(e.container); chain.push(e.container); } });
+    if (chain.length >= 2) {
+      results.push({ type: 'cascade', time: sorted[i].timestamp, chain });
+      lastCascadeEnd = tsMsArr[i] + 30_000;
+    }
+  }
+  return results.slice(0, 8);
+}
+
+function renderPatCard(p) {
+  if (p.type === 'recurring') {
+    return `<div class="pat-card recurring">
+      <div class="pat-header">
+        <span class="pat-badge recurring">Recurring</span>
+        <span class="pat-title">${escHtml(p.key.slice(0, 100))}</span>
+      </div>
+      <div class="pat-desc">Repeats ${p.interval} &nbsp;·&nbsp; ${p.count} occurrences &nbsp;·&nbsp; first seen ${escHtml(fmtTs(p.first))}</div>
+    </div>`;
+  }
+  if (p.type === 'burst') {
+    const label = p.durationSec > 0 ? `${p.count} errors in ${p.durationSec}s` : `${p.count} errors`;
+    return `<div class="pat-card burst">
+      <div class="pat-header">
+        <span class="pat-badge burst">Burst</span>
+        <span class="pat-title">Error burst at ${escHtml(fmtTs(p.time).slice(11,19))}</span>
+      </div>
+      <div class="pat-desc">${escHtml(label)}</div>
+      <button class="pat-link" onclick="filterToWindow('${escAttr(p.tsFrom)}','${escAttr(p.tsTo)}')">→ Filter log to this window</button>
+    </div>`;
+  }
+  if (p.type === 'cascade') {
+    const chain = p.chain.map(c => `<span class="container-tag">${escHtml(c)}</span>`).join(' <span style="color:var(--text-muted)">→</span> ');
+    return `<div class="pat-card cascade">
+      <div class="pat-header">
+        <span class="pat-badge cascade">Cascade</span>
+        <span class="pat-title">Cascading failure at ${escHtml(fmtTs(p.time).slice(11,19))}</span>
+      </div>
+      <div class="pat-cascade-chain">${chain}</div>
+    </div>`;
+  }
+  return '';
+}
+
+function filterToWindow(tsFrom, tsTo) {
+  // Pad the window slightly so edge entries are included
+  const from = new Date(new Date(tsFrom).getTime() - 2000);
+  const to   = new Date(new Date(tsTo).getTime()   + 2000);
+  const fmt  = d => d.toISOString().slice(0,16); // "YYYY-MM-DDTHH:MM"
+  document.getElementById('filter-from').value = fmt(from);
+  document.getElementById('filter-to').value   = fmt(to);
+  applyFilters();
+  switchTab('logs');
 }
 
 // ── manager summary ───────────────────────────────────────────────────────
