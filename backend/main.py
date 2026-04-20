@@ -409,6 +409,30 @@ def entry_detail(idx: int):
             "meta": _entry_summary(e)}
 
 
+# ── multi-index chain lookup ─────────────────────────────────────────────────
+# NOTE: must be registered BEFORE /chain/{request_id:path}.  The :path converter
+# in that route matches slashes, so it would swallow /chain-any/… as
+# request_id="any/…" if this route were ordered after it.
+
+@app.get("/chain-any/{id:path}")
+def chain_any(id: str):
+    """Search all four indexes (request, connection, external_event, queue_message) for an id."""
+    entries = _store["entries"]
+    for key in ("by_request", "by_connection", "by_external_event", "by_queue_message"):
+        indices = _store.get(key, {}).get(id, [])
+        if indices:
+            grp = sorted([entries[i] for i in indices], key=lambda e: e["_ts"])
+            tss = [e["_ts"] for e in grp if e["_ts"]]
+            return {
+                "id": id, "total": len(grp),
+                "source": key,
+                "start_time": min(tss) if tss else None,
+                "end_time":   max(tss) if tss else None,
+                "entries":    [_entry_summary(e) for e in grp],
+            }
+    return {"id": id, "total": 0, "source": None, "entries": []}
+
+
 # ── chain ─────────────────────────────────────────────────────────────────────
 
 @app.get("/chain/{request_id:path}")
@@ -597,27 +621,6 @@ def _build_error_summary(errors: list[dict]) -> list[dict]:
         if msg and len(counts[key]["messages"]) < 3 and msg not in counts[key]["messages"]:
             counts[key]["messages"].append(msg)
     return sorted(counts.values(), key=lambda x: -x["count"])
-
-
-# ── multi-index chain lookup ─────────────────────────────────────────────────
-
-@app.get("/chain-any/{id:path}")
-def chain_any(id: str):
-    """Search all four indexes (request, connection, external_event, queue_message) for an id."""
-    entries = _store["entries"]
-    for key in ("by_request", "by_connection", "by_external_event", "by_queue_message"):
-        indices = _store.get(key, {}).get(id, [])
-        if indices:
-            grp = sorted([entries[i] for i in indices], key=lambda e: e["_ts"])
-            tss = [e["_ts"] for e in grp if e["_ts"]]
-            return {
-                "id": id, "total": len(grp),
-                "source": key,
-                "start_time": min(tss) if tss else None,
-                "end_time":   max(tss) if tss else None,
-                "entries":    [_entry_summary(e) for e in grp],
-            }
-    return {"id": id, "total": 0, "source": None, "entries": []}
 
 
 # ── event timeline ────────────────────────────────────────────────────────────
