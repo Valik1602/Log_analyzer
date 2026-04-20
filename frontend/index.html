@@ -215,11 +215,38 @@
   .hm-stats { margin-top: 10px; font-size: .74rem; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: 20px; }
   .hm-stats strong { color: var(--text); }
   .hm-bar-chart { margin-top: 4px; }
-  .hm-bars { display: flex; align-items: flex-end; gap: 3px; height: 100px; }
-  .hm-bar { flex: 1; border-radius: 2px 2px 0 0; min-height: 2px; transition: opacity .15s; cursor: default; }
-  .hm-bar:hover { opacity: .75; }
+  .hm-bars { display: flex; align-items: flex-end; gap: 3px; height: 110px; }
+  .hm-bar { flex: 1; border-radius: 2px 2px 0 0; min-height: 2px; transition: opacity .15s, outline .1s; cursor: pointer; }
+  .hm-bar:hover { opacity: .78; }
+  .hm-bar.hm-bar-selected { outline: 2px solid var(--accent); outline-offset: 2px; }
   .hm-bar-xlabels { display: flex; gap: 3px; margin-top: 3px; }
   .hm-bar-xl { flex: 1; text-align: center; font-size: .54rem; color: var(--text-muted); }
+
+  /* heatmap rich tooltip */
+  .hm-tooltip { position: fixed; pointer-events: none; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px 11px; font-size: .72rem; z-index: 400; box-shadow: 0 4px 18px rgba(0,0,0,.55); display: none; min-width: 130px; }
+  .hm-tt-hour { font-weight: 600; margin-bottom: 3px; }
+  .hm-tt-cnt  { color: var(--sev-error); }
+  .hm-tt-ctr  { color: var(--text-muted); font-size: .67rem; margin-top: 3px; }
+
+  /* heatmap stats grid */
+  .hm-stats-grid { margin-top: 12px; display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 6px; }
+  .hm-stat-item  { background: var(--surface2); border-radius: 6px; padding: 7px 10px; }
+  .hm-stat-label { font-size: .59rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .07em; margin-bottom: 3px; }
+  .hm-stat-value { font-size: .77rem; font-weight: 600; word-break: break-word; line-height: 1.3; }
+
+  /* heatmap hour detail panel */
+  .hm-detail { margin-top: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .hm-detail-hdr { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--border); background: rgba(99,102,241,.06); flex-wrap: wrap; gap: 8px; }
+  .hm-detail-hdr h3 { font-size: .84rem; font-weight: 600; flex: 1; white-space: nowrap; }
+  .hm-detail-body { overflow-y: auto; max-height: 340px; }
+  .hm-detail-body table { width: 100%; border-collapse: collapse; font-size: .73rem; }
+  .hm-detail-body th { position: sticky; top: 0; background: var(--surface2); padding: 6px 10px; text-align: left; font-size: .62rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+  .hm-detail-body td { padding: 5px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .hm-detail-body tr:last-child td { border-bottom: none; }
+  .hm-drow { cursor: pointer; transition: background .1s; }
+  .hm-drow:hover { background: var(--surface2); }
+  .hm-d-ts  { white-space: nowrap; font-family: monospace; font-size: .68rem; color: var(--text-muted); }
+  .hm-d-msg { word-break: break-word; max-width: 340px; }
 
   /* ── pattern detection ── */
   .patterns-wrap { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
@@ -1456,10 +1483,19 @@ function downloadBlob(content, filename, mime) {
 
 // ── heatmap ────────────────────────────────────────────────────────────────
 
+let _hmTooltipEl = null;
+function _getHmTooltip() {
+  if (!_hmTooltipEl) {
+    _hmTooltipEl = document.createElement('div');
+    _hmTooltipEl.className = 'hm-tooltip';
+    document.body.appendChild(_hmTooltipEl);
+  }
+  return _hmTooltipEl;
+}
+
 async function loadHeatmap() {
   if (heatmapLoaded) return;
   const wrap = document.getElementById('heatmap-container');
-  // Reuse already-loaded errors or fetch fresh
   if (!_errorsData) {
     wrap.innerHTML = '<div class="empty"><span class="spinner"></span> Loading…</div>';
     try {
@@ -1474,33 +1510,139 @@ async function loadHeatmap() {
   const errEntries = _errorsData.map(x => x.error);
   if (!errEntries.length) { wrap.innerHTML = '<div class="empty">No ERROR/CRITICAL entries to display.</div>'; return; }
 
-  // Build grid[day 0-6][hour 0-23]  (day 0 = Mon)
-  const grid = Array.from({length:7}, () => new Array(24).fill(0));
+  const dates = new Set(errEntries.filter(e => e.timestamp).map(e => e.timestamp.slice(0,10)));
+  if (dates.size <= 1) {
+    wrap.innerHTML = renderHeatmapBars(errEntries, [...dates][0] || '');
+    attachHmBarEvents(errEntries);
+  } else {
+    wrap.innerHTML = renderHeatmapGrid(errEntries);
+  }
+}
+
+// ── bar chart (single-day) ─────────────────────────────────────────────────
+
+function renderHeatmapBars(errEntries, date) {
+  const byHour   = Array.from({length:24}, () => []);
+  errEntries.forEach(e => { if (e.timestamp) byHour[new Date(e.timestamp).getHours()].push(e); });
+  const hourTotals = byHour.map(arr => arr.length);
+  const maxVal     = Math.max(...hourTotals, 1);
+  const barColor   = n => n === 0 ? 'var(--surface2)' : n <= 5 ? 'rgba(245,158,11,.45)' : n <= 20 ? 'rgba(245,158,11,.8)' : 'rgba(239,68,68,.85)';
+
+  let html = `<div class="hm-bar-chart">`;
+  html += `<div style="font-size:.7rem;color:var(--text-muted);margin-bottom:6px">Hourly errors — ${escHtml(date)}</div>`;
+  html += '<div class="hm-bars" id="hm-bars-wrap">';
+  hourTotals.forEach((n, h) => {
+    const pct = Math.round((n / maxVal) * 100);
+    html += `<div class="hm-bar" data-hour="${h}" style="height:${Math.max(n > 0 ? pct : 2, 2)}%;background:${barColor(n)}"></div>`;
+  });
+  html += '</div><div class="hm-bar-xlabels">';
+  for (let h = 0; h < 24; h++) html += `<div class="hm-bar-xl">${h % 3 === 0 ? String(h).padStart(2,'0') : ''}</div>`;
+  html += '</div></div>';
+  html += buildHmStatsHtml(errEntries, hourTotals);
+  html += '<div id="hm-detail-panel"></div>';
+  return html;
+}
+
+function attachHmBarEvents(errEntries) {
+  const byHour = Array.from({length:24}, () => []);
+  errEntries.forEach(e => { if (e.timestamp) byHour[new Date(e.timestamp).getHours()].push(e); });
+
+  const wrap = document.getElementById('hm-bars-wrap');
+  if (!wrap) return;
+
+  // tooltip on mousemove (event delegation)
+  wrap.addEventListener('mousemove', ev => {
+    const bar = ev.target.closest('.hm-bar');
+    if (!bar) { _getHmTooltip().style.display = 'none'; return; }
+    const h   = +bar.dataset.hour;
+    const n   = byHour[h].length;
+    const h2  = String(h).padStart(2,'0');
+    const h2n = String((h+1)%24).padStart(2,'0');
+    const ctrMap = {};
+    byHour[h].forEach(e => { if (e.container) ctrMap[e.container] = (ctrMap[e.container]||0)+1; });
+    const topCtr = Object.entries(ctrMap).sort((a,b) => b[1]-a[1])[0];
+    const tt = _getHmTooltip();
+    tt.innerHTML =
+      `<div class="hm-tt-hour">${h2}:00 – ${h2n}:00</div>` +
+      `<div class="hm-tt-cnt">${n} error${n!==1?'s':''}</div>` +
+      (topCtr ? `<div class="hm-tt-ctr">${escHtml(topCtr[0])}: ${topCtr[1]}</div>` : '');
+    tt.style.display = 'block';
+    const x = ev.clientX + 14, y = ev.clientY - 10;
+    tt.style.left = Math.min(x, window.innerWidth  - tt.offsetWidth  - 8) + 'px';
+    tt.style.top  = Math.min(y, window.innerHeight - tt.offsetHeight - 8) + 'px';
+  });
+  wrap.addEventListener('mouseleave', () => { _getHmTooltip().style.display = 'none'; });
+
+  // click → detail panel
+  wrap.addEventListener('click', ev => {
+    const bar = ev.target.closest('.hm-bar');
+    if (!bar) return;
+    _getHmTooltip().style.display = 'none';
+    const h = +bar.dataset.hour;
+    wrap.querySelectorAll('.hm-bar').forEach(b => b.classList.toggle('hm-bar-selected', b === bar));
+    openHmHourDetail(h, byHour[h]);
+  });
+}
+
+function openHmHourDetail(hour, entries) {
+  const panel = document.getElementById('hm-detail-panel');
+  if (!panel) return;
+  const h2  = String(hour).padStart(2,'0');
+  const h2n = String((hour+1)%24).padStart(2,'0');
+  const sorted = [...entries].filter(e => e.timestamp).sort((a,b) => a.timestamp < b.timestamp ? -1 : 1);
+
+  if (!sorted.length) {
+    panel.innerHTML = `<div class="hm-detail"><div style="padding:14px;font-size:.78rem;color:var(--text-muted)">No errors in this hour.</div></div>`;
+    return;
+  }
+  const tsFrom = sorted[0].timestamp;
+  const tsTo   = sorted[sorted.length-1].timestamp;
+  const rows = sorted.map(e => {
+    const ts     = fmtTs(e.timestamp).slice(11,19) || '—';
+    const rawSev = (e.severity||'ERROR').toUpperCase();
+    const sev    = ['CRITICAL','ERROR','WARNING','INFO','DEBUG'].includes(rawSev) ? rawSev : 'DEFAULT';
+    return `<tr class="hm-drow" onclick="openEntryFromHeatmap(${e.idx})">
+      <td class="hm-d-ts">${escHtml(ts)}</td>
+      <td><span class="sev sev-${sev}">${sev}</span></td>
+      <td>${e.container ? `<span class="container-tag">${escHtml(e.container)}</span>` : '—'}</td>
+      <td class="hm-d-msg">${escHtml((e.message||'').slice(0,120))}</td>
+    </tr>`;
+  }).join('');
+
+  panel.innerHTML = `<div class="hm-detail">
+    <div class="hm-detail-hdr">
+      <h3>Errors at ${h2}:00–${h2n}:00 <span style="font-weight:400;color:var(--text-muted)">(${sorted.length} entries)</span></h3>
+      <button class="btn sm" onclick="filterToWindow('${escAttr(tsFrom)}','${escAttr(tsTo)}')">View in Log Entries →</button>
+    </div>
+    <div class="hm-detail-body">
+      <table>
+        <thead><tr><th>Time</th><th>Severity</th><th>Container</th><th>Message</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </div>`;
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function openEntryFromHeatmap(idx) {
+  switchTab('logs');
+  setTimeout(() => selectEntry(idx), 60);
+}
+
+// ── grid (multi-day) ───────────────────────────────────────────────────────
+
+function renderHeatmapGrid(errEntries) {
+  const grid  = Array.from({length:7}, () => new Array(24).fill(0));
   const dates = new Set();
   errEntries.forEach(e => {
     if (!e.timestamp) return;
     const d = new Date(e.timestamp);
-    const dow  = (d.getDay() + 6) % 7; // Mon=0 … Sun=6
-    const hour = d.getHours();
-    grid[dow][hour]++;
-    dates.add(e.timestamp.slice(0, 10));
+    grid[(d.getDay()+6)%7][d.getHours()]++;
+    dates.add(e.timestamp.slice(0,10));
   });
-
-  // Single-day fallback → bar chart
-  if (dates.size <= 1) { wrap.innerHTML = renderHeatmapBars(grid, [...dates][0] || ''); return; }
-
-  // Compute hourly totals for stats
   const hourTotals = Array.from({length:24}, (_,h) => grid.reduce((s,row) => s+row[h], 0));
-  const peakHour   = hourTotals.indexOf(Math.max(...hourTotals));
-  // Quietest 3-hour window
-  let minSum = Infinity, quietStart = 0;
-  for (let h = 0; h < 24; h++) {
-    const s = hourTotals[h] + hourTotals[(h+1)%24] + hourTotals[(h+2)%24];
-    if (s < minSum) { minSum = s; quietStart = h; }
-  }
-
-  const DAYS  = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-  const cellClass = n => n === 0 ? 'hm-c0' : n <= 5 ? 'hm-c1' : n <= 20 ? 'hm-c2' : n <= 50 ? 'hm-c3' : 'hm-c4';
+  const DAYS       = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const cellClass  = n => n===0?'hm-c0':n<=5?'hm-c1':n<=20?'hm-c2':n<=50?'hm-c3':'hm-c4';
 
   let html = '<div class="hm-wrap"><table class="hm-table"><thead><tr><th></th>';
   for (let h = 0; h < 24; h++) html += `<th>${String(h).padStart(2,'0')}</th>`;
@@ -1509,49 +1651,53 @@ async function loadHeatmap() {
     html += `<tr><td class="hm-day">${day}</td>`;
     for (let h = 0; h < 24; h++) {
       const n = grid[di][h];
-      const tip = `${day} ${String(h).padStart(2,'0')}:00 — ${n} error${n!==1?'s':''}`;
-      html += `<td><div class="hm-cell ${cellClass(n)}" title="${escAttr(tip)}"></div></td>`;
+      html += `<td><div class="hm-cell ${cellClass(n)}" title="${escAttr(`${day} ${String(h).padStart(2,'0')}:00 — ${n} error${n!==1?'s':''}`)}"></div></td>`;
     }
     html += '</tr>';
   });
   html += '</tbody></table></div>';
-
-  // Legend
   html += `<div class="hm-legend">
-    <div class="hm-lg hm-c0"></div>0
-    <div class="hm-lg hm-c1"></div>1–5
-    <div class="hm-lg hm-c2"></div>6–20
-    <div class="hm-lg hm-c3"></div>21–50
+    <div class="hm-lg hm-c0"></div>0&nbsp;
+    <div class="hm-lg hm-c1"></div>1–5&nbsp;
+    <div class="hm-lg hm-c2"></div>6–20&nbsp;
+    <div class="hm-lg hm-c3"></div>21–50&nbsp;
     <div class="hm-lg hm-c4"></div>51+
   </div>`;
-
-  // Stats
-  const fmt = h => `${String(h).padStart(2,'0')}:00`;
-  html += `<div class="hm-stats">
-    <span>Peak hour: <strong>${fmt(peakHour)}–${fmt((peakHour+1)%24)}</strong> (${hourTotals[peakHour]} errors)</span>
-    <span>Quietest period: <strong>${fmt(quietStart)}–${fmt((quietStart+3)%24)}</strong></span>
-    <span>Days in log: <strong>${dates.size}</strong></span>
-  </div>`;
-
-  wrap.innerHTML = html;
+  html += buildHmStatsHtml(errEntries, hourTotals);
+  return html;
 }
 
-function renderHeatmapBars(grid, date) {
-  const hourTotals = Array.from({length:24}, (_,h) => grid.reduce((s,row) => s+row[h], 0));
-  const maxVal = Math.max(...hourTotals, 1);
-  const barColor = n => n === 0 ? 'var(--surface2)' : n <= 5 ? 'rgba(245,158,11,.45)' : n <= 20 ? 'rgba(245,158,11,.8)' : 'rgba(239,68,68,.8)';
+// ── shared stats panel ─────────────────────────────────────────────────────
 
-  let html = `<div class="hm-bar-chart"><div style="font-size:.7rem;color:var(--text-muted);margin-bottom:6px">Hourly errors — ${escHtml(date)}</div>`;
-  html += '<div class="hm-bars">';
-  hourTotals.forEach((n, h) => {
-    const pct = Math.round((n / maxVal) * 100);
-    const tip = `${String(h).padStart(2,'0')}:00 — ${n} error${n!==1?'s':''}`;
-    html += `<div class="hm-bar" style="height:${Math.max(pct,2)}%;background:${barColor(n)}" title="${escAttr(tip)}"></div>`;
+function buildHmStatsHtml(entries, hourTotals) {
+  if (!entries.length) return '';
+  const sorted = entries.filter(e => e.timestamp).sort((a,b) => a.timestamp < b.timestamp ? -1 : 1);
+  const peakH  = hourTotals.indexOf(Math.max(...hourTotals));
+  const fmt    = h => `${String(h).padStart(2,'0')}:00`;
+  const hoursWithErrors = hourTotals.filter(n => n > 0).length;
+
+  const ctrMap = {};
+  entries.forEach(e => { if (e.container) ctrMap[e.container] = (ctrMap[e.container]||0)+1; });
+  const topCtr = Object.entries(ctrMap).sort((a,b) => b[1]-a[1])[0];
+
+  const msgMap = {};
+  entries.forEach(e => {
+    const k = (e.exception_type || e.message || '').slice(0,80).trim();
+    if (k) msgMap[k] = (msgMap[k]||0)+1;
   });
-  html += '</div><div class="hm-bar-xlabels">';
-  for (let h = 0; h < 24; h++) html += `<div class="hm-bar-xl">${h%3===0?String(h).padStart(2,'0'):''}</div>`;
-  html += '</div></div>';
-  return html;
+  const topMsg = Object.entries(msgMap).sort((a,b) => b[1]-a[1])[0];
+
+  const stat = (label, val) =>
+    `<div class="hm-stat-item"><div class="hm-stat-label">${label}</div><div class="hm-stat-value">${val}</div></div>`;
+
+  return `<div class="hm-stats-grid">
+    ${stat('Peak hour',             `${fmt(peakH)}–${fmt((peakH+1)%24)} — ${hourTotals[peakH]} errors`)}
+    ${stat('Total errors in view',  `${entries.length} errors across ${hoursWithErrors} hour${hoursWithErrors!==1?'s':''}`)}
+    ${sorted.length   ? stat('First error', escHtml(fmtTs(sorted[0].timestamp))) : ''}
+    ${sorted.length>1 ? stat('Last error',  escHtml(fmtTs(sorted[sorted.length-1].timestamp))) : ''}
+    ${topCtr ? stat('Most affected container', escHtml(`${topCtr[0]} (${topCtr[1]} errors)`)) : ''}
+    ${topMsg ? stat('Most common error', `<span title="${escAttr(topMsg[0])}">${escHtml(topMsg[0].slice(0,60))}${topMsg[0].length>60?'…':''}</span>`) : ''}
+  </div>`;
 }
 
 // ── pattern detection ──────────────────────────────────────────────────────
