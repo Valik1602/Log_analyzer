@@ -281,6 +281,23 @@
   .esc-bar-fill { height: 100%; background: var(--sev-error); border-radius: 3px; }
   .esc-count { font-size: .72rem; color: var(--text-muted); white-space: nowrap; min-width: 28px; text-align: right; }
 
+  /* ── manager summary ── */
+  #mgr-summary-btn-wrap { display: none; margin-top: 4px; }
+  #mgr-summary-btn { display: flex; align-items: center; gap: 6px; font-size: .78rem; }
+  #mgr-summary-btn svg { flex-shrink: 0; }
+
+  #mgr-modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 500; align-items: center; justify-content: center; }
+  #mgr-modal-overlay.open { display: flex; }
+  #mgr-modal { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; width: min(820px, 94vw); max-height: 88vh; display: flex; flex-direction: column; box-shadow: 0 12px 48px rgba(0,0,0,.6); }
+  #mgr-modal-header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  #mgr-modal-header h2 { font-size: .92rem; font-weight: 700; flex: 1; }
+  #mgr-modal-header .mgr-badge { font-size: .62rem; background: var(--accent); border-radius: 4px; padding: 2px 6px; }
+  #mgr-modal-actions { display: flex; gap: 6px; }
+  #mgr-modal-body { flex: 1; overflow-y: auto; padding: 14px 16px; }
+  #mgr-summary-text { width: 100%; min-height: 460px; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 14px; font-family: 'Consolas', 'Courier New', monospace; font-size: .76rem; line-height: 1.65; resize: vertical; outline: none; }
+  #mgr-summary-text:focus { border-color: var(--accent); }
+  #mgr-loading { text-align: center; padding: 40px; color: var(--text-muted); font-size: .82rem; }
+
   /* ── misc ── */
   .empty { text-align: center; padding: 32px; color: var(--text-muted); font-size: .82rem; }
   .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }
@@ -365,6 +382,13 @@
         <div class="card error clickable" id="card-errors-wrap" onclick="cardFilter('errors')" title="Filter errors &amp; criticals"><div class="label">Errors</div><div class="value" id="card-errors">—</div></div>
         <div class="card warn clickable" id="card-warnings-wrap" onclick="cardFilter('warnings')" title="Filter warnings"><div class="label">Warnings</div><div class="value" id="card-warnings">—</div></div>
         <div class="card info"><div class="label">Time Range</div><div class="value" id="card-range" style="font-size:.7rem;line-height:1.4">—</div></div>
+      </div>
+
+      <div id="mgr-summary-btn-wrap">
+        <button class="btn" id="mgr-summary-btn" onclick="openManagerSummary()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          Generate Manager Summary
+        </button>
       </div>
 
       <div class="tabs" id="view-tabs">
@@ -506,6 +530,25 @@
   </div><!-- /main -->
 </div>
 
+<!-- ── Manager Summary Modal ── -->
+<div id="mgr-modal-overlay" onclick="closeMgrModalOnBackdrop(event)">
+  <div id="mgr-modal">
+    <div id="mgr-modal-header">
+      <h2>Manager Summary</h2>
+      <span class="mgr-badge">Incident Report</span>
+      <div id="mgr-modal-actions">
+        <button class="btn ghost sm" onclick="mgrCopy()">Copy</button>
+        <button class="btn ghost sm" onclick="mgrExport()">Export .txt</button>
+        <button class="btn ghost sm" onclick="closeMgrModal()">✕ Close</button>
+      </div>
+    </div>
+    <div id="mgr-modal-body">
+      <div id="mgr-loading"><span class="spinner"></span> Generating summary…</div>
+      <textarea id="mgr-summary-text" style="display:none" spellcheck="false" readonly></textarea>
+    </div>
+  </div>
+</div>
+
 <script>
 const API = 'http://127.0.0.1:8000';
 
@@ -616,13 +659,14 @@ async function loadContainers() {
 // ── show main UI ───────────────────────────────────────────────────────────
 
 function showMainUI() {
-  document.getElementById('placeholder').style.display   = 'none';
-  document.getElementById('summary-cards').style.display = 'grid';
+  document.getElementById('placeholder').style.display      = 'none';
+  document.getElementById('summary-cards').style.display    = 'grid';
+  document.getElementById('mgr-summary-btn-wrap').style.display = 'block';
   document.getElementById('view-tabs').classList.add('visible');
-  document.getElementById('filters').style.display      = 'flex';
-  document.getElementById('table-wrap').style.display   = 'block';
-  document.getElementById('pagination').style.display   = 'flex';
-  document.getElementById('errors-btn-wrap').style.display = 'block';
+  document.getElementById('filters').style.display          = 'flex';
+  document.getElementById('table-wrap').style.display       = 'block';
+  document.getElementById('pagination').style.display       = 'flex';
+  document.getElementById('errors-btn-wrap').style.display  = 'block';
 }
 
 // ── tabs ───────────────────────────────────────────────────────────────────
@@ -1211,6 +1255,219 @@ function toast(msg, isError) {
   el.textContent = msg;
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 4000);
+}
+
+// ── manager summary ───────────────────────────────────────────────────────
+
+async function openManagerSummary() {
+  const overlay = document.getElementById('mgr-modal-overlay');
+  const loading = document.getElementById('mgr-loading');
+  const textarea = document.getElementById('mgr-summary-text');
+  overlay.classList.add('open');
+  loading.style.display = 'block';
+  textarea.style.display = 'none';
+  try {
+    const [summary, errData] = await Promise.all([
+      fetch(`${API}/summary`).then(r => r.json()),
+      fetch(`${API}/errors?context_size=0`).then(r => r.json()),
+    ]);
+    const text = buildManagerSummary(summary, errData.errors || []);
+    textarea.value = text;
+    loading.style.display = 'none';
+    textarea.style.display = 'block';
+  } catch(e) {
+    loading.textContent = 'Failed to generate summary: ' + e.message;
+  }
+}
+
+function closeMgrModal() {
+  document.getElementById('mgr-modal-overlay').classList.remove('open');
+}
+function closeMgrModalOnBackdrop(e) {
+  if (e.target === document.getElementById('mgr-modal-overlay')) closeMgrModal();
+}
+function mgrCopy() {
+  const t = document.getElementById('mgr-summary-text');
+  navigator.clipboard.writeText(t.value).then(() => toast('Copied to clipboard'));
+}
+function mgrExport() {
+  const text = document.getElementById('mgr-summary-text').value;
+  const blob = new Blob([text], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `manager-summary-${new Date().toISOString().slice(0,10)}.txt`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function buildManagerSummary(summary, errors) {
+  const lines = [];
+  const hr  = (ch = '─') => ch.repeat(64);
+  const pad = (label, value) => `${(label + ':').padEnd(28)}${value}`;
+
+  const totalEntries  = summary.total || 0;
+  const sevCounts     = summary.severity_counts || {};
+  const errorCount    = (sevCounts.ERROR || 0) + (sevCounts.CRITICAL || 0);
+  const warningCount  = sevCounts.WARNING || 0;
+  const errorRate     = totalEntries > 0 ? errorCount / totalEntries : 0;
+  const health        = errorRate > 0.05 ? 'CRITICAL' : errorRate > 0.005 ? 'DEGRADED' : 'HEALTHY';
+
+  const fmtDt = ts => ts ? fmtTs(ts) : 'N/A';
+
+  // ── Header ──
+  lines.push('GKE LOG ANALYSIS — MANAGER SUMMARY');
+  lines.push(`Generated: ${new Date().toLocaleString()}`);
+  lines.push(hr());
+  lines.push('');
+
+  // ── 1. Incident Overview ──
+  lines.push('1. INCIDENT OVERVIEW');
+  lines.push(hr('-'));
+  lines.push(pad('Log period start',  fmtDt(summary.time_min)));
+  lines.push(pad('Log period end',    fmtDt(summary.time_max)));
+  lines.push(pad('Total entries',     totalEntries.toLocaleString()));
+  lines.push(pad('Errors / Criticals', errorCount.toLocaleString()));
+  lines.push(pad('Warnings',          warningCount.toLocaleString()));
+  lines.push(pad('Overall health',    health));
+  lines.push('');
+
+  // ── 2. Impact ──
+  lines.push('2. IMPACT');
+  lines.push(hr('-'));
+
+  const errEntries = errors.map(e => e.error);
+
+  // Affected services
+  const svcMap = {};
+  errEntries.forEach(e => { if (e.container) svcMap[e.container] = (svcMap[e.container] || 0) + 1; });
+  const svcList = Object.entries(svcMap).sort((a,b) => b[1]-a[1]);
+
+  // Affected senders (sender_key = best available proxy for bot/target identity)
+  const senders = new Set(errEntries.map(e => e.sender_key).filter(Boolean));
+
+  // Failed queue messages
+  const failedQMsgs = new Set(errEntries.map(e => e.queue_message_id).filter(Boolean));
+
+  // Unique external events
+  const failedEvents = new Set(errEntries.map(e => e.external_event_id).filter(Boolean));
+
+  lines.push(pad('Failed requests',       errorCount.toLocaleString()));
+  if (svcList.length) {
+    lines.push('Affected services:');
+    svcList.forEach(([name, cnt]) => lines.push(`  • ${name}: ${cnt} error(s)`));
+  } else {
+    lines.push(pad('Affected services', 'N/A'));
+  }
+  lines.push(pad('Unique sender keys',    senders.size > 0 ? [...senders].join(', ') : 'N/A'));
+  lines.push(pad('Failed queue messages', failedQMsgs.size > 0 ? failedQMsgs.size.toLocaleString() : '0'));
+  lines.push(pad('Affected event IDs',   failedEvents.size > 0 ? failedEvents.size.toLocaleString() : '0'));
+  lines.push('');
+
+  // ── 3. Error Breakdown ──
+  lines.push('3. ERROR BREAKDOWN');
+  lines.push(hr('-'));
+
+  // Group by exception type: prefer stack_trace first line, then exception_type, then message prefix
+  const excGroups = {};
+  errEntries.forEach(e => {
+    let key = '';
+    if (e.stack_trace) {
+      key = e.stack_trace.split('\n')[0].slice(0, 120).trim();
+    } else if (e.exception_type) {
+      key = e.exception_type;
+    } else if (e.exception_message) {
+      key = e.exception_message.slice(0, 100);
+    } else {
+      key = (e.message || 'Unknown').slice(0, 100);
+    }
+    if (!excGroups[key]) excGroups[key] = { count: 0, first: e.timestamp, last: e.timestamp };
+    const g = excGroups[key];
+    g.count++;
+    if (e.timestamp < g.first) g.first = e.timestamp;
+    if (e.timestamp > g.last)  g.last  = e.timestamp;
+  });
+
+  const excList = Object.entries(excGroups).sort((a,b) => b[1].count - a[1].count);
+  if (excList.length === 0) {
+    lines.push('  No errors found.');
+  } else {
+    excList.forEach(([type, g]) => {
+      lines.push(`  [${g.count}x] ${type}`);
+      lines.push(`        First: ${fmtDt(g.first)}   Last: ${fmtDt(g.last)}`);
+    });
+  }
+  lines.push('');
+
+  // ── 4. Timeline of Failures ──
+  lines.push('4. TIMELINE OF FAILURES (most recent 20)');
+  lines.push(hr('-'));
+
+  const sorted = [...errEntries].sort((a,b) => (a.timestamp||'') < (b.timestamp||'') ? -1 : 1);
+  const recent20 = sorted.slice(-20);
+  if (recent20.length === 0) {
+    lines.push('  No failures recorded.');
+  } else {
+    recent20.forEach(e => {
+      const ts  = fmtDt(e.timestamp).slice(11, 19) || '??:??:??';
+      const sev = (e.severity || 'ERROR').padEnd(8);
+      const ctr = e.container ? `[${e.container}]` : '';
+      const msg = (e.message || '').slice(0, 90);
+      const rid = e.request_id ? ` (req: ${e.request_id.slice(0,8)}…)` : '';
+      lines.push(`  [${ts}] ${sev} ${ctr} ${msg}${rid}`);
+    });
+  }
+  lines.push('');
+
+  // ── 5. Root Cause Candidates ──
+  lines.push('5. ROOT CAUSE CANDIDATES');
+  lines.push(hr('-'));
+
+  const firstError = sorted[0];
+  if (firstError) {
+    lines.push('First error observed:');
+    lines.push(`  Time:      ${fmtDt(firstError.timestamp)}`);
+    lines.push(`  Container: ${firstError.container || 'N/A'}`);
+    lines.push(`  Message:   ${(firstError.message || '').slice(0, 200)}`);
+    if (firstError.stack_trace) {
+      lines.push(`  Exception: ${firstError.stack_trace.split('\n')[0].slice(0, 160)}`);
+    }
+    lines.push('');
+  }
+
+  lines.push('Top 3 most frequent error types:');
+  excList.slice(0, 3).forEach(([ type, g], i) => {
+    lines.push(`  ${i+1}. [${g.count}x] ${type.slice(0, 120)}`);
+  });
+  lines.push('');
+
+  // ── 6. Recommendations ──
+  lines.push('6. RECOMMENDATIONS');
+  lines.push(hr('-'));
+
+  const allMsgs = errEntries.map(e =>
+    ((e.message||'') + ' ' + (e.stack_trace||'') + ' ' + (e.exception_message||'')).toLowerCase()
+  ).join(' ');
+
+  const recs = [];
+  if (/recipient not found|user not found|bot not installed/.test(allMsgs))
+    recs.push('• Check user onboarding / bot installation status — "recipient not found" errors detected.');
+  if (/cannot send outbox|outbox item|outbox queue/.test(allMsgs))
+    recs.push('• Check Teams connector / outbox queue health — send failures detected.');
+  if (/msal|token|unauthorized|401|authentication/.test(allMsgs))
+    recs.push('• Check MSAL token configuration — authentication failures detected.');
+  if (/timeout|timed out|connection refused|gateway/.test(allMsgs))
+    recs.push('• Investigate downstream service timeouts or connectivity issues.');
+  if (/database|sql|dbcontext|entity framework/.test(allMsgs))
+    recs.push('• Check database connectivity and query performance.');
+  if (recs.length === 0)
+    recs.push('• Review stack traces in the Errors tab for detailed root cause analysis.');
+
+  recs.forEach(r => lines.push(r));
+  lines.push('');
+  lines.push(hr());
+  lines.push('End of Manager Summary');
+
+  return lines.join('\n');
 }
 
 // ── wire-ups ───────────────────────────────────────────────────────────────
