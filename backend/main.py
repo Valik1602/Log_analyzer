@@ -79,6 +79,35 @@ _store: dict[str, Any] = {
     "parsed_at": None,
 }
 
+# Second file for comparison (same structure, never overwrites _store)
+_compare_store: dict[str, Any] | None = None
+
+# ── template normalisation (for compare) ─────────────────────────────────────
+
+_TMPL_GUID = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+_TMPL_EMAIL = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
+_TMPL_FILE  = re.compile(
+    r"\b[\w.\-]+\.(?:pdf|docx?|xlsx?|zip|txt|log|jpg|png|json)\b",
+    re.IGNORECASE,
+)
+_TMPL_HEX  = re.compile(r"\b[0-9a-f]{8,}\b", re.IGNORECASE)
+_TMPL_NUM  = re.compile(r"\b\d{4,}\b")
+
+
+def _normalize_template(msg: str) -> str:
+    """Strip dynamic values so the same error pattern from different runs matches."""
+    if not msg:
+        return ""
+    msg = _TMPL_GUID.sub("{GUID}", msg)
+    msg = _TMPL_EMAIL.sub("{EMAIL}", msg)
+    msg = _TMPL_FILE.sub("{FILE}", msg)
+    msg = _TMPL_HEX.sub("{HEX}", msg)
+    msg = _TMPL_NUM.sub("{NUM}", msg)
+    return re.sub(r"\s+", " ", msg).strip()
+
 # ── field extractors ──────────────────────────────────────────────────────────
 
 def _ts(entry: dict) -> str:
@@ -592,6 +621,149 @@ def event_detail(external_event_id: str):
         "entries":    [_entry_summary(e) for e in grp],
         "errors":     errors,
         "error_summary": error_summary,
+    }
+
+
+# ── upload-compare ───────────────────────────────────────────────────────────
+
+@app.post("/upload-compare")
+async def upload_compare(file: UploadFile = File(...)):
+    global _compare_store
+
+    data    = await file.read()
+    entries: list[dict] = []
+    skipped = 0
+
+    for raw in _stream_entries(data):
+        try:
+            entries.append(_normalise(raw, len(entries)))
+        except Exception:
+            skipped += 1
+
+    _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    entries.sort(key=lambda e: _parse_dt(e["_ts"]) or _EPOCH)
+    for i, e in enumerate(entries):
+        e["_idx"] = i
+
+    _compare_store = {
+        "entries":   entries,
+        "skipped":   skipped,
+        "parsed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return {"total": len(entries), "skipped": skipped, "parsed_at": _compare_store["parsed_at"]}
+
+
+# ── compare ───────────────────────────────────────────────────────────────────
+
+@app.get("/compare")
+def compare():
+    if not _compare_store or not _compare_store["entries"]:
+        raise HTTPException(status_code=400, detail="No comparison file loaded. POST to /upload-compare first.")
+    if not _store["entries"]:
+        raise HTTPException(status_code=400, detail="No main log file loaded.")
+
+    e1 = _store["entries"]
+    e2 = _compare_store["entries"]
+
+    def build_groups(entries: list[dict]) -> dict:
+        groups: dict[str, dict] = defaultdict(lambda: {
+            "count": 0, "first": None, "last": None, "containers": set()
+        })
+        for e in entries:
+            if e["_severity"] not in {"ERROR", "CRITICAL"}:
+                continue
+            p    = e.get("jsonPayload") or {}
+            raw  = e["_message"] or p.get("exceptionType", "") or p.get("@x", "").split("\n")[0]
+            tmpl = _normalize_template(raw) or "{unknown}"
+            g    = groups[tmpl]
+            g["count"] += 1
+            ts = e["_ts"]
+            if ts:
+                if not g["first"] or ts < g["first"]:
+                    g["first"] = ts
+                if not g["last"] or ts > g["last"]:
+                    g["last"] = ts
+            if e["_container"]:
+                g["containers"].add(e["_container"])
+        return groups
+
+    g1 = build_groups(e1)
+    g2 = build_groups(e2)
+    all_templates = set(g1) | set(g2)
+
+    new_errors: list[dict]      = []
+    resolved_errors: list[dict] = []
+    worsened: list[dict]        = []
+    improved: list[dict]        = []
+
+    for tmpl in all_templates:
+        d1 = g1.get(tmpl)
+        d2 = g2.get(tmpl)
+
+        if d2 and not d1:
+            new_errors.append({
+                "template":   tmpl,
+                "count":      d2["count"],
+                "first_seen": d2["first"],
+                "last_seen":  d2["last"],
+                "containers": sorted(d2["containers"]),
+            })
+        elif d1 and not d2:
+            resolved_errors.append({
+                "template":        tmpl,
+                "count":           d1["count"],
+                "last_seen_file1": d1["last"],
+                "containers":      sorted(d1["containers"]),
+            })
+        elif d1 and d2:
+            c1, c2 = d1["count"], d2["count"]
+            pct    = round((c2 - c1) / max(c1, 1) * 100, 1)
+            entry  = {
+                "template":     tmpl,
+                "count_before": c1,
+                "count_after":  c2,
+                "pct_change":   pct,
+                "first_seen":   d2["first"],
+                "last_seen":    d2["last"],
+                "containers":   sorted(d2["containers"]),
+            }
+            if c2 > c1:
+                worsened.append(entry)
+            else:
+                improved.append(entry)
+
+    new_errors.sort(      key=lambda x: -x["count"])
+    resolved_errors.sort( key=lambda x: -x["count"])
+    worsened.sort(        key=lambda x: -x["pct_change"])
+    improved.sort(        key=lambda x:  x["pct_change"])
+
+    def file_stats(entries: list[dict]) -> dict:
+        sev: dict[str, int] = defaultdict(int)
+        for e in entries:
+            sev[e["_severity"]] += 1
+        tss = [e["_ts"] for e in entries if e["_ts"]]
+        return {
+            "total":    len(entries),
+            "errors":   sev["ERROR"] + sev["CRITICAL"],
+            "warnings": sev["WARNING"],
+            "time_min": min(tss) if tss else None,
+            "time_max": max(tss) if tss else None,
+        }
+
+    s1 = file_stats(e1)
+    s2 = file_stats(e2)
+
+    return {
+        "summary": {
+            "file1":          s1,
+            "file2":          s2,
+            "delta_errors":   s2["errors"]   - s1["errors"],
+            "delta_warnings": s2["warnings"] - s1["warnings"],
+        },
+        "new_errors":      new_errors,
+        "resolved_errors": resolved_errors,
+        "worsened":        worsened,
+        "improved":        improved,
     }
 
 

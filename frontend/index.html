@@ -352,6 +352,56 @@
   .esc-bar-fill { height: 100%; background: var(--sev-error); border-radius: 3px; }
   .esc-count { font-size: .72rem; color: var(--text-muted); white-space: nowrap; min-width: 28px; text-align: right; }
 
+  /* ── compare mode ── */
+  #compare-upload-zone { display: none; margin-top: 8px; }
+  #compare-upload-zone.visible { display: block; }
+  #compare-file-input { display: none; }
+  #compare-drop-zone { border: 2px dashed var(--border); border-radius: 8px; padding: 14px 10px; text-align: center; cursor: pointer; transition: border-color .2s, background .2s; }
+  #compare-drop-zone:hover, #compare-drop-zone.drag { border-color: #818cf8; background: rgba(99,102,241,.08); }
+  #compare-drop-zone p { font-size: .72rem; color: var(--text-muted); }
+  #compare-drop-zone p strong { color: var(--text); }
+  #compare-status { font-size: .68rem; color: var(--text-muted); margin-top: 5px; text-align: center; }
+  .compare-mode-active { background: rgba(99,102,241,.15) !important; border-color: var(--accent) !important; color: var(--accent-hover) !important; }
+
+  #compare-view { display: none; }
+  #compare-view.open { display: block; }
+
+  .cmp-summary-bar { background: var(--surface2); border-radius: 8px; padding: 12px 16px; display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: center; margin-bottom: 14px; }
+  .cmp-file { font-size: .74rem; }
+  .cmp-file-label { font-size: .59rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .07em; margin-bottom: 3px; }
+  .cmp-file-range  { font-size: .68rem; color: var(--text-muted); }
+  .cmp-file-counts { display: flex; gap: 10px; margin-top: 3px; font-size: .73rem; }
+  .cmp-delta { text-align: center; }
+  .cmp-delta-val { font-size: 1.2rem; font-weight: 700; }
+  .cmp-delta-val.worse { color: var(--sev-error); }
+  .cmp-delta-val.better { color: #22c55e; }
+  .cmp-delta-val.neutral { color: var(--text-muted); }
+  .cmp-delta-label { font-size: .6rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .06em; }
+
+  .cmp-section { margin-bottom: 16px; }
+  .cmp-section-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .cmp-section-head h3 { font-size: .82rem; font-weight: 600; }
+  .cmp-section-badge { font-size: .62rem; border-radius: 4px; padding: 2px 7px; font-weight: 600; }
+  .cmp-badge-new      { background: rgba(239,68,68,.18);  color: #fca5a5; }
+  .cmp-badge-resolved { background: rgba(34,197,94,.18);  color: #86efac; }
+  .cmp-badge-worsened { background: rgba(249,115,22,.18); color: #fdba74; }
+  .cmp-badge-improved { background: rgba(59,130,246,.18); color: #93c5fd; }
+
+  .cmp-card { border-radius: 7px; padding: 10px 14px; margin-bottom: 6px; border: 1px solid; }
+  .cmp-card.new-error  { background: rgba(239,68,68,.06);  border-color: rgba(239,68,68,.3); }
+  .cmp-card.resolved   { background: rgba(34,197,94,.06);  border-color: rgba(34,197,94,.25); }
+  .cmp-card.worsened   { background: rgba(249,115,22,.06); border-color: rgba(249,115,22,.3); }
+  .cmp-card.improved   { background: rgba(59,130,246,.06); border-color: rgba(59,130,246,.25); }
+  .cmp-card-header { display: flex; align-items: flex-start; gap: 8px; }
+  .cmp-card-tmpl { flex: 1; font-family: monospace; font-size: .74rem; word-break: break-word; line-height: 1.4; }
+  .cmp-card-count { white-space: nowrap; font-size: .8rem; font-weight: 700; }
+  .cmp-card-count.new-error { color: #fca5a5; }
+  .cmp-card-count.resolved  { color: #86efac; }
+  .cmp-card-count.worsened  { color: #fdba74; }
+  .cmp-card-count.improved  { color: #93c5fd; }
+  .cmp-card-meta { font-size: .67rem; color: var(--text-muted); margin-top: 5px; display: flex; flex-wrap: wrap; gap: 10px; }
+  .cmp-card-ctrs { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 4px; }
+
   /* ── export dropdown ── */
   .export-wrap { position: relative; display: inline-block; }
   .export-dropdown { position: absolute; top: calc(100% + 4px); right: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.5); min-width: 160px; z-index: 200; overflow: hidden; display: none; }
@@ -415,6 +465,7 @@
     </div>
 
     <span id="header-stats" style="font-size:.71rem;color:var(--text-muted);margin-left:auto;white-space:nowrap"></span>
+    <button class="btn ghost sm" id="compare-mode-btn" onclick="toggleCompareMode()" style="white-space:nowrap">↔ Compare</button>
   </header>
 
   <div id="main">
@@ -431,6 +482,15 @@
       <input type="file" id="file-input" accept=".json,.ndjson,.jsonl,.log">
       <div id="progress-bar-wrap"><div id="progress-bar"></div></div>
       <div id="progress-label"></div>
+
+      <div id="compare-upload-zone">
+        <div id="compare-drop-zone">
+          <p><strong>Drop 2nd log file</strong></p>
+          <p>or click to browse</p>
+        </div>
+        <input type="file" id="compare-file-input" accept=".json,.ndjson,.jsonl,.log">
+        <div id="compare-status"></div>
+      </div>
 
       <div class="side-section" id="sev-section" style="display:none">
         <h3>Severity</h3>
@@ -475,6 +535,7 @@
         <div class="tab" onclick="switchTab('chain')">Chain View</div>
         <div class="tab" onclick="switchTab('errors')">Errors</div>
         <div class="tab" onclick="switchTab('heatmap')">Heatmap</div>
+        <div class="tab" id="compare-tab" onclick="switchTab('compare')" style="display:none">↔ Compare</div>
         <div class="tab" id="search-tab" onclick="switchTab('search')" style="display:none">🔍 Search Results</div>
       </div>
 
@@ -626,6 +687,11 @@
         <div id="sr-empty" class="empty" style="display:none">No matching entries found.</div>
       </div>
 
+      <!-- ── Compare View ── -->
+      <div id="compare-view">
+        <div id="compare-container"><div class="empty">Loading comparison…</div></div>
+      </div>
+
     </div><!-- /content -->
   </div><!-- /main -->
 </div>
@@ -658,6 +724,7 @@ let state = {
 };
 let errorsLoaded  = false;
 let heatmapLoaded = false;
+let compareLoaded = false;
 let _errorsData   = null;
 
 // ── upload ─────────────────────────────────────────────────────────────────
@@ -674,6 +741,8 @@ async function doUpload(file) {
   errorsLoaded  = false;
   heatmapLoaded = false;
   _errorsData   = null;
+  compareLoaded = false;
+  document.getElementById('compare-tab').style.display = 'none';
   setProgress(true, 'Uploading…');
   const fd = new FormData();
   fd.append('file', file);
@@ -777,13 +846,14 @@ function showMainUI() {
 
 function switchTab(tab) {
   state.currentTab = tab;
-  const names = ['logs','chain','errors','heatmap','search'];
+  const names = ['logs','chain','errors','heatmap','compare','search'];
   document.querySelectorAll('.tab').forEach((el, i) => el.classList.toggle('active', names[i] === tab));
-  document.getElementById('logs-view').style.display  = tab === 'logs'    ? 'block' : 'none';
-  document.getElementById('chain-view').classList.toggle('open',   tab === 'chain');
-  document.getElementById('errors-view').classList.toggle('open',  tab === 'errors');
-  document.getElementById('heatmap-view').classList.toggle('open', tab === 'heatmap');
-  document.getElementById('search-view').classList.toggle('open',  tab === 'search');
+  document.getElementById('logs-view').style.display    = tab === 'logs'    ? 'block' : 'none';
+  document.getElementById('chain-view').classList.toggle('open',    tab === 'chain');
+  document.getElementById('errors-view').classList.toggle('open',   tab === 'errors');
+  document.getElementById('heatmap-view').classList.toggle('open',  tab === 'heatmap');
+  document.getElementById('compare-view').classList.toggle('open',  tab === 'compare');
+  document.getElementById('search-view').classList.toggle('open',   tab === 'search');
   if (tab === 'errors')  loadErrors();
   if (tab === 'heatmap') loadHeatmap();
 }
@@ -2060,6 +2130,175 @@ function buildManagerSummary(summary, errors) {
   lines.push('End of Manager Summary');
 
   return lines.join('\n');
+}
+
+// ── compare mode ──────────────────────────────────────────────────────────
+
+let _compareModeOn = false;
+
+function toggleCompareMode() {
+  _compareModeOn = !_compareModeOn;
+  const btn  = document.getElementById('compare-mode-btn');
+  const zone = document.getElementById('compare-upload-zone');
+  btn.classList.toggle('compare-mode-active', _compareModeOn);
+  zone.classList.toggle('visible', _compareModeOn);
+}
+
+// Wire up second upload zone
+(function () {
+  const zone  = document.getElementById('compare-drop-zone');
+  const input = document.getElementById('compare-file-input');
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('drag'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault(); zone.classList.remove('drag');
+    if (e.dataTransfer.files[0]) doCompareUpload(e.dataTransfer.files[0]);
+  });
+  input.addEventListener('change', () => { if (input.files[0]) doCompareUpload(input.files[0]); });
+})();
+
+async function doCompareUpload(file) {
+  const status = document.getElementById('compare-status');
+  const zone   = document.getElementById('compare-drop-zone');
+  status.textContent = 'Uploading…';
+  zone.style.opacity = '.5';
+  try {
+    const fd  = new FormData();
+    fd.append('file', file);
+    const res = await fetch(`${API}/upload-compare`, { method: 'POST', body: fd });
+    if (!res.ok) throw new Error(await res.text());
+    const d = await res.json();
+    status.textContent = `Loaded ${d.total.toLocaleString()} entries`;
+    zone.style.opacity = '1';
+    compareLoaded = false;
+    document.getElementById('compare-tab').style.display = 'inline-block';
+    switchTab('compare');
+    await loadCompare();
+  } catch(e) {
+    status.textContent = 'Upload failed: ' + e.message;
+    zone.style.opacity  = '1';
+  }
+}
+
+async function loadCompare() {
+  if (compareLoaded) return;
+  const container = document.getElementById('compare-container');
+  container.innerHTML = '<div class="empty"><span class="spinner"></span> Comparing…</div>';
+  try {
+    const data = await fetch(`${API}/compare`).then(r => {
+      if (!r.ok) return r.text().then(t => { throw new Error(t); });
+      return r.json();
+    });
+    compareLoaded = true;
+    container.innerHTML = renderCompareView(data);
+  } catch(e) {
+    container.innerHTML = `<div class="empty" style="color:var(--sev-error)">Compare failed: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function renderCompareView(d) {
+  const s  = d.summary;
+  const f1 = s.file1, f2 = s.file2;
+
+  const fmtRange = (f) => f.time_min ? `${fmtTs(f.time_min)} → ${fmtTs(f.time_max)}` : 'N/A';
+  const deltaSign = (n) => n > 0 ? `+${n}` : `${n}`;
+  const deltaClass = (n, worseIfPositive = true) =>
+    n === 0 ? 'neutral' : (n > 0) === worseIfPositive ? 'worse' : 'better';
+
+  // ── Summary bar ──
+  let html = `<div class="cmp-summary-bar">
+    <div class="cmp-file">
+      <div class="cmp-file-label">File 1 (baseline)</div>
+      <div class="cmp-file-range">${escHtml(fmtRange(f1))}</div>
+      <div class="cmp-file-counts">
+        <span>${f1.total.toLocaleString()} entries</span>
+        <span style="color:var(--sev-error)">${f1.errors} errors</span>
+        <span style="color:var(--sev-warning)">${f1.warnings} warnings</span>
+      </div>
+    </div>
+    <div class="cmp-delta">
+      <div class="cmp-delta-val ${deltaClass(s.delta_errors)}">${deltaSign(s.delta_errors)}</div>
+      <div class="cmp-delta-label">errors</div>
+      <div class="cmp-delta-val ${deltaClass(s.delta_warnings)}" style="margin-top:6px">${deltaSign(s.delta_warnings)}</div>
+      <div class="cmp-delta-label">warnings</div>
+    </div>
+    <div class="cmp-file" style="text-align:right">
+      <div class="cmp-file-label">File 2 (new)</div>
+      <div class="cmp-file-range">${escHtml(fmtRange(f2))}</div>
+      <div class="cmp-file-counts" style="justify-content:flex-end">
+        <span>${f2.total.toLocaleString()} entries</span>
+        <span style="color:var(--sev-error)">${f2.errors} errors</span>
+        <span style="color:var(--sev-warning)">${f2.warnings} warnings</span>
+      </div>
+    </div>
+  </div>`;
+
+  // ── 4 sections ──
+  html += cmpSection('New Errors',      'new-error',  d.new_errors,      renderCmpNew);
+  html += cmpSection('Resolved',        'resolved',   d.resolved_errors, renderCmpResolved);
+  html += cmpSection('Worsened',        'worsened',   d.worsened,        renderCmpChanged);
+  html += cmpSection('Improved',        'improved',   d.improved,        renderCmpChanged);
+  return html;
+}
+
+function cmpSection(title, type, items, renderFn) {
+  const badgeClass = { 'new-error': 'cmp-badge-new', resolved: 'cmp-badge-resolved',
+                        worsened:  'cmp-badge-worsened', improved: 'cmp-badge-improved' }[type];
+  if (!items.length) return '';
+  return `<div class="cmp-section">
+    <div class="cmp-section-head">
+      <h3>${escHtml(title)}</h3>
+      <span class="cmp-section-badge ${badgeClass}">${items.length}</span>
+    </div>
+    ${items.map(item => renderFn(item, type)).join('')}
+  </div>`;
+}
+
+function cmpCardMeta(item) {
+  const parts = [];
+  if (item.first_seen) parts.push(`First: ${escHtml(fmtTs(item.first_seen))}`);
+  if (item.last_seen)  parts.push(`Last: ${escHtml(fmtTs(item.last_seen))}`);
+  const meta = parts.length ? `<div class="cmp-card-meta">${parts.map(p => `<span>${p}</span>`).join('')}</div>` : '';
+  const ctrs = (item.containers || []).length
+    ? `<div class="cmp-card-ctrs">${item.containers.map(c => `<span class="container-tag">${escHtml(c)}</span>`).join('')}</div>` : '';
+  return meta + ctrs;
+}
+
+function renderCmpNew(item, type) {
+  return `<div class="cmp-card ${type}">
+    <div class="cmp-card-header">
+      <span class="cmp-card-tmpl">${escHtml(item.template)}</span>
+      <span class="cmp-card-count ${type}">${item.count}×</span>
+    </div>
+    ${cmpCardMeta(item)}
+  </div>`;
+}
+
+function renderCmpResolved(item, type) {
+  return `<div class="cmp-card ${type}">
+    <div class="cmp-card-header">
+      <span class="cmp-card-tmpl">${escHtml(item.template)}</span>
+      <span class="cmp-card-count ${type}">✓ gone</span>
+    </div>
+    <div class="cmp-card-meta">
+      <span>Was ${item.count}× in file 1</span>
+      ${item.last_seen_file1 ? `<span>Last seen: ${escHtml(fmtTs(item.last_seen_file1))}</span>` : ''}
+    </div>
+    ${(item.containers||[]).length ? `<div class="cmp-card-ctrs">${item.containers.map(c=>`<span class="container-tag">${escHtml(c)}</span>`).join('')}</div>` : ''}
+  </div>`;
+}
+
+function renderCmpChanged(item, type) {
+  const arrow = type === 'worsened' ? '▲' : '▼';
+  const pct   = Math.abs(item.pct_change);
+  return `<div class="cmp-card ${type}">
+    <div class="cmp-card-header">
+      <span class="cmp-card-tmpl">${escHtml(item.template)}</span>
+      <span class="cmp-card-count ${type}">${item.count_before} → ${item.count_after} ${arrow}${pct}%</span>
+    </div>
+    ${cmpCardMeta(item)}
+  </div>`;
 }
 
 // ── wire-ups ───────────────────────────────────────────────────────────────
