@@ -25,8 +25,13 @@ from main import (
     _connection_id,
     _detect_query_type,
     _external_event_id,
+    _infer_severity_from_text,
+    _is_csv_upload,
     _message,
     _normalise,
+    _normalize_csv_severity,
+    _normalize_template,
+    _parse_datadog_csv,
     _parse_dt,
     _pod,
     _queue_message_id,
@@ -606,8 +611,14 @@ class TestBuildErrorList:
         result = _build_error_list(matched)
         assert result[0]["root_cause"] == "SomeException: boom"
 
-    def test_empty_stack_trace_gives_empty_root_cause(self):
-        matched = self._normed([_gke_entry(severity="ERROR")])
+    def test_empty_stack_trace_falls_back_to_message_template(self):
+        # Plain-text logs (no Serilog @x stack trace) still need a usable
+        # root-cause grouping key, so this falls back to the normalized message.
+        matched = self._normed([_gke_entry(severity="ERROR", message="test message")])
+        assert _build_error_list(matched)[0]["root_cause"] == "test message"
+
+    def test_empty_stack_trace_and_message_gives_empty_root_cause(self):
+        matched = self._normed([_gke_entry(severity="ERROR", message="")])
         assert _build_error_list(matched)[0]["root_cause"] == ""
 
     def test_empty_input_returns_empty(self):
@@ -724,3 +735,188 @@ class TestBuildEventGroups:
                        timestamp="2024-01-01T10:01:00Z")
         matched = [_normalise(e, 0)]
         assert _build_event_groups(matched)[0]["group_type"] == "ExternalEventId"
+
+
+# ─────────────────────────── Datadog CSV support ───────────────────────────────
+
+class TestIsCsvUpload:
+    def test_csv_extension_detected(self):
+        assert _is_csv_upload(b"anything", "export.csv") is True
+
+    def test_json_array_not_detected_as_csv(self):
+        assert _is_csv_upload(b'[{"a": 1}]', "logs.json") is False
+
+    def test_ndjson_not_detected_as_csv(self):
+        assert _is_csv_upload(b'{"a": 1}\n{"a": 2}', None) is False
+
+    def test_comma_header_without_extension_detected_as_csv(self):
+        assert _is_csv_upload(b"Date,Host,Service,Content\n2024,h,s,c", None) is True
+
+    def test_empty_data_not_csv(self):
+        assert _is_csv_upload(b"", None) is False
+
+
+class TestNormalizeCsvSeverity:
+    @pytest.mark.parametrize("raw,expected", [
+        ("error", "ERROR"), ("err", "ERROR"),
+        ("warn", "WARNING"), ("warning", "WARNING"),
+        ("info", "INFO"), ("notice", "INFO"), ("ok", "INFO"),
+        ("critical", "CRITICAL"), ("emergency", "CRITICAL"), ("fatal", "CRITICAL"),
+        ("debug", "DEBUG"), ("trace", "DEBUG"),
+    ])
+    def test_known_aliases(self, raw, expected):
+        assert _normalize_csv_severity(raw) == expected
+
+    def test_unknown_value_is_uppercased_as_is(self):
+        assert _normalize_csv_severity("weird") == "WEIRD"
+
+
+class TestInferSeverityFromText:
+    def test_error_keyword(self):
+        assert _infer_severity_from_text("Failed to connect to database") == "ERROR"
+
+    def test_exception_keyword(self):
+        assert _infer_severity_from_text("NullPointerException at line 5") == "ERROR"
+
+    def test_warning_keyword(self):
+        assert _infer_severity_from_text("Retry limit warning issued") == "WARNING"
+
+    def test_fatal_keyword_is_critical(self):
+        assert _infer_severity_from_text("fatal: disk full") == "CRITICAL"
+
+    def test_plain_text_defaults_to_info(self):
+        assert _infer_severity_from_text("Successfully fetched file.parquet") == "INFO"
+
+
+class TestNormalizeTemplateKeyValueIds:
+    def test_request_id_stripped(self):
+        a = _normalize_template("Failed request_id=abc-123 timeout")
+        b = _normalize_template("Failed request_id=xyz-999 timeout")
+        assert a == b == "Failed request_id={ID} timeout"
+
+    def test_trace_id_stripped(self):
+        assert _normalize_template("boom trace_id=deadbeef01") == "boom trace_id={ID}"
+
+
+def _csv_bytes(text: str) -> bytes:
+    return text.encode("utf-8")
+
+
+class TestParseDatadogCsv:
+    def test_basic_columns_map_to_entry_fields(self):
+        csv_text = (
+            "Date,Host,Service,Content\n"
+            '"2024-01-01T10:00:00.000Z","host-1","my-service","hello world"\n'
+        )
+        entries = [_normalise(raw, i) for i, raw in enumerate(_parse_datadog_csv(_csv_bytes(csv_text)))]
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["_ts"] == "2024-01-01T10:00:00.000Z"
+        assert e["_container"] == "my-service"
+        assert e["_pod"] == "host-1"
+        assert e["_message"] == "hello world"
+        assert e["_severity"] == "INFO"
+
+    def test_explicit_status_column_overrides_inference(self):
+        csv_text = (
+            "Date,Host,Service,Status,Message\n"
+            '"2024-01-01T10:00:00.000Z","h","s","warn","all good here"\n'
+        )
+        entries = [_normalise(raw, i) for i, raw in enumerate(_parse_datadog_csv(_csv_bytes(csv_text)))]
+        assert entries[0]["_severity"] == "WARNING"
+
+    def test_severity_inferred_from_content_when_no_status_column(self):
+        csv_text = (
+            "Date,Host,Service,Content\n"
+            '"2024-01-01T10:00:00.000Z","h","s","Failed to process batch"\n'
+        )
+        entries = [_normalise(raw, i) for i, raw in enumerate(_parse_datadog_csv(_csv_bytes(csv_text)))]
+        assert entries[0]["_severity"] == "ERROR"
+
+    def test_explicit_request_id_extracted(self):
+        csv_text = (
+            "Date,Host,Service,Content\n"
+            '"2024-01-01T10:00:00.000Z","h","s","charge failed request_id=abc-123"\n'
+        )
+        entries = [_normalise(raw, i) for i, raw in enumerate(_parse_datadog_csv(_csv_bytes(csv_text)))]
+        assert entries[0]["_request_id"] == "abc-123"
+
+    def test_inline_uuid_used_as_request_id_when_no_explicit_field(self):
+        csv_text = (
+            "Date,Host,Service,Content\n"
+            f'"2024-01-01T10:00:00.000Z","h","s","trace {_REQ_ID} completed"\n'
+        )
+        entries = [_normalise(raw, i) for i, raw in enumerate(_parse_datadog_csv(_csv_bytes(csv_text)))]
+        assert entries[0]["_request_id"] == _REQ_ID
+
+    def test_context_propagates_chronologically_for_same_host_service(self):
+        # Newest-first file order (typical Datadog export), but the entity
+        # marker is on the chronologically-earliest row.
+        csv_text = (
+            "Date,Host,Service,Content\n"
+            '"2024-01-01T10:00:05.000Z","h","s","block read row count = 2"\n'
+            '"2024-01-01T10:00:00.000Z","h","s","Listing S3 prefix path/iid=ENTITY1/date=2024-01-01/"\n'
+        )
+        entries = [_normalise(raw, i) for i, raw in enumerate(_parse_datadog_csv(_csv_bytes(csv_text)))]
+        by_ts = {e["_ts"]: e for e in entries}
+        assert by_ts["2024-01-01T10:00:00.000Z"]["_external_event_id"] == "ENTITY1|2024-01-01"
+        assert by_ts["2024-01-01T10:00:05.000Z"]["_external_event_id"] == "ENTITY1|2024-01-01"
+
+    def test_context_does_not_leak_across_different_host_service(self):
+        csv_text = (
+            "Date,Host,Service,Content\n"
+            '"2024-01-01T10:00:00.000Z","h1","s1","Listing S3 prefix path/iid=ENTITY1/date=2024-01-01/"\n'
+            '"2024-01-01T10:00:01.000Z","h2","s2","block read row count = 2"\n'
+        )
+        entries = [_normalise(raw, i) for i, raw in enumerate(_parse_datadog_csv(_csv_bytes(csv_text)))]
+        by_host = {e["_pod"]: e for e in entries}
+        assert by_host["h2"]["_external_event_id"] == ""
+
+    def test_extra_columns_preserved_as_payload_fields(self):
+        csv_text = (
+            "Date,Host,Service,Content,Region\n"
+            '"2024-01-01T10:00:00.000Z","h","s","hi","eu-west-1"\n'
+        )
+        raw = list(_parse_datadog_csv(_csv_bytes(csv_text)))[0]
+        assert raw["jsonPayload"]["Region"] == "eu-west-1"
+
+    def test_empty_csv_yields_no_entries(self):
+        assert list(_parse_datadog_csv(b"")) == []
+
+    def test_header_only_csv_yields_no_entries(self):
+        assert list(_parse_datadog_csv(b"Date,Host,Service,Content\n")) == []
+
+
+class TestUploadEndpointCsv:
+    def test_csv_upload_detected_and_parsed(self):
+        csv_text = (
+            "Date,Host,Service,Content\n"
+            '"2024-01-01T10:00:00.000Z","host-1","svc","hello"\n'
+            '"2024-01-01T10:00:01.000Z","host-1","svc","world"\n'
+        )
+        resp = client.post(
+            "/upload",
+            files={"file": ("export.csv", csv_text.encode(), "text/csv")},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        assert data["format"] == "datadog_csv"
+
+    def test_json_upload_reports_gke_format(self):
+        data = _upload_entries([_gke_entry()])
+        assert data["format"] == "gke_json"
+
+    def test_csv_errors_grouped_by_message_template_root_cause(self):
+        csv_text = (
+            "Date,Host,Service,Status,Message\n"
+            '"2024-01-01T10:00:00.000Z","h","s","error","Failed to charge request_id=abc-123"\n'
+            '"2024-01-01T10:00:01.000Z","h","s","error","Failed to charge request_id=xyz-999"\n'
+        )
+        client.post("/upload", files={"file": ("export.csv", csv_text.encode(), "text/csv")})
+        errors = client.get("/errors").json()
+        assert errors["total"] == 2
+        search = client.get("/search?q=charge").json()
+        summary = search["error_summary"]
+        assert len(summary) == 1
+        assert summary[0]["count"] == 2

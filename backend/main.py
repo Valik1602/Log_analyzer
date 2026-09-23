@@ -11,6 +11,7 @@ NOTE: _store is replaced atomically on each upload. This is safe for the
 
 from __future__ import annotations
 
+import csv
 import io
 import json
 import re
@@ -77,6 +78,7 @@ _store: dict[str, Any] = {
     "by_queue_message": {},   # QueueMessageId  → [entry_index, ...]
     "skipped": 0,
     "parsed_at": None,
+    "format": None,
 }
 
 # Second file for comparison (same structure, never overwrites _store)
@@ -95,6 +97,14 @@ _TMPL_FILE  = re.compile(
 )
 _TMPL_HEX  = re.compile(r"\b[0-9a-f]{8,}\b", re.IGNORECASE)
 _TMPL_NUM  = re.compile(r"\b\d{4,}\b")
+# Plain-text logs (Datadog CSV) commonly embed correlation ids as key=value
+# pairs rather than a dedicated field; strip the value so e.g.
+# "request_id=abc-123" and "request_id=xyz-999" template to the same string
+# and get grouped under one root cause instead of two.
+_TMPL_KV_ID = re.compile(
+    r'\b((?:request|trace|correlation|session|job|task)[_-]?id)\s*[=:]\s*"?[\w.-]+"?',
+    re.IGNORECASE,
+)
 
 
 def _normalize_template(msg: str) -> str:
@@ -104,6 +114,7 @@ def _normalize_template(msg: str) -> str:
     msg = _TMPL_GUID.sub("{GUID}", msg)
     msg = _TMPL_EMAIL.sub("{EMAIL}", msg)
     msg = _TMPL_FILE.sub("{FILE}", msg)
+    msg = _TMPL_KV_ID.sub(r"\1={ID}", msg)
     msg = _TMPL_HEX.sub("{HEX}", msg)
     msg = _TMPL_NUM.sub("{NUM}", msg)
     return re.sub(r"\s+", " ", msg).strip()
@@ -252,6 +263,175 @@ def _stream_entries(data: bytes):
                 pass
 
 
+# ── Datadog CSV support ────────────────────────────────────────────────────────
+# Datadog's "Export to CSV" produces a flat table — typically
+# Date,Host,Service,Content (or Date,Host,Service,Message, sometimes with an
+# extra Status/Level column and/or a Tags column). There is no structured
+# jsonPayload, no severity field (usually), and no request/trace id column —
+# those live inside the free-text Content/Message if they exist at all.
+# The parser below reshapes each row into the same raw-entry shape the GKE
+# JSON parser produces (timestamp / severity / jsonPayload / resource.labels)
+# so every downstream endpoint (chain, search, errors, compare, summary)
+# keeps working unmodified — Service maps to "container", Host maps to "pod".
+
+_SEV_KEYWORDS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(fatal|panic)\b", re.IGNORECASE), "CRITICAL"),
+    # "\w*exception\b" (no leading \b) also matches concatenated exception
+    # class names like NullPointerException / ArgumentException.
+    (re.compile(r"\b(error|traceback|failed|failure)\b|\w*exception\b", re.IGNORECASE), "ERROR"),
+    (re.compile(r"\b(warn|warning|deprecat\w*)\b", re.IGNORECASE), "WARNING"),
+    (re.compile(r"\b(debug)\b", re.IGNORECASE), "DEBUG"),
+]
+
+def _infer_severity_from_text(text: str) -> str:
+    """Best-effort severity when the CSV has no explicit status/level column."""
+    for pattern, sev in _SEV_KEYWORDS:
+        if pattern.search(text):
+            return sev
+    return "INFO"
+
+
+# Datadog's own Status/Level column uses its own vocabulary (warn, err, notice,
+# emergency, …) — map it onto the app's canonical severity set so filtering,
+# badges and the frontend's fixed severity list (CRITICAL/ERROR/WARNING/INFO/DEBUG)
+# work the same for CSV uploads as they do for GKE JSON.
+_SEV_ALIASES = {
+    "emergency": "CRITICAL", "alert": "CRITICAL", "fatal": "CRITICAL",
+    "panic": "CRITICAL", "critical": "CRITICAL", "crit": "CRITICAL",
+    "error": "ERROR", "err": "ERROR",
+    "warn": "WARNING", "warning": "WARNING",
+    "notice": "INFO", "info": "INFO", "information": "INFO", "ok": "INFO",
+    "debug": "DEBUG", "trace": "DEBUG",
+}
+
+def _normalize_csv_severity(raw: str) -> str:
+    return _SEV_ALIASES.get(raw.strip().lower(), raw.strip().upper())
+
+
+# Explicit correlation fields written as key=value or key: value in free text.
+_CSV_CORR_PATTERNS = [
+    re.compile(r'\brequest[_-]?id\s*[=:]\s*"?([\w.-]+)"?', re.IGNORECASE),
+    re.compile(r'\b(?:trace[_-]?id|dd\.trace_id)\s*[=:]\s*"?([\w.-]+)"?', re.IGNORECASE),
+    re.compile(r'\bcorrelation[_-]?id\s*[=:]\s*"?([\w.-]+)"?', re.IGNORECASE),
+    re.compile(r'\bsession[_-]?id\s*[=:]\s*"?([\w.-]+)"?', re.IGNORECASE),
+    re.compile(r'\b(?:job|task)[_-]?id\s*[=:]\s*"?([\w.-]+)"?', re.IGNORECASE),
+]
+_CSV_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE
+)
+# Domain pattern seen in data-pipeline logs (e.g. "iid=DK0010272632.YYYY.DKK ... date=2026-09-21"):
+# an entity id plus a date partition — used to reconstruct the fetch/read pipeline for one entity.
+_CSV_ENTITY_RE = re.compile(r"\biid=([^\s/]+)")
+_CSV_DATE_PART_RE = re.compile(r"\bdate=(\d{4}-\d{2}-\d{2})")
+
+
+def _extract_csv_attributes(content: str, last_entity: dict[tuple[str, str], str], hs_key: tuple[str, str]) -> dict[str, str]:
+    """Pull correlation/dependency ids out of a free-text log line.
+
+    RequestId → finest-grained correlation (explicit id, else inline UUID).
+    ExternalEventId → coarser "which entity/resource is this about" grouping,
+    used to reconstruct multi-line pipelines (list → fetch → parse → read).
+    When a line carries no entity marker of its own, it inherits the most
+    recently seen one for the same Host+Service, since Datadog CSV rows for
+    a single pipeline run appear as a contiguous block for that host/service.
+    """
+    attrs: dict[str, str] = {}
+
+    for pattern in _CSV_CORR_PATTERNS:
+        m = pattern.search(content)
+        if m:
+            attrs["RequestId"] = m.group(1)
+            break
+    if "RequestId" not in attrs:
+        m = _CSV_UUID_RE.search(content)
+        if m:
+            attrs["RequestId"] = m.group(0)
+
+    entity_m = _CSV_ENTITY_RE.search(content)
+    if entity_m:
+        key = entity_m.group(1)
+        date_m = _CSV_DATE_PART_RE.search(content)
+        if date_m:
+            key = f"{key}|{date_m.group(1)}"
+        attrs["ExternalEventId"] = key
+        last_entity[hs_key] = key
+    elif hs_key in last_entity:
+        attrs["ExternalEventId"] = last_entity[hs_key]
+
+    return attrs
+
+
+def _parse_datadog_csv(data: bytes):
+    """Yield raw GKE-shaped entries parsed from a Datadog CSV export."""
+    text = data.decode("utf-8-sig", errors="replace")
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        return
+
+    field_map = {f.strip().lower(): f for f in reader.fieldnames if f}
+
+    def pick(*names: str) -> str | None:
+        for n in names:
+            if n in field_map:
+                return field_map[n]
+        return None
+
+    date_field    = pick("date", "timestamp", "time", "@timestamp")
+    host_field    = pick("host", "hostname")
+    service_field = pick("service", "service_name", "source")
+    status_field  = pick("status", "level", "severity")
+    message_field = pick("content", "message", "msg")
+    tags_field    = pick("tags")
+
+    consumed = {f for f in (date_field, host_field, service_field, status_field, message_field, tags_field) if f}
+    extra_fields = [f for f in reader.fieldnames if f and f not in consumed]
+
+    last_entity: dict[tuple[str, str], str] = {}
+
+    # Datadog CSV exports list rows newest-first. Context (ExternalEventId)
+    # must propagate in chronological order — e.g. the "Listing S3 prefix…"
+    # line that names an entity comes chronologically before the "block
+    # read…" lines that report on it, even though it appears further down
+    # the (reverse-ordered) file. Sort a stable copy for propagation only;
+    # output order doesn't matter since the caller re-sorts by timestamp.
+    _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    rows = [row for row in reader if row is not None]
+    rows.sort(key=lambda r: _parse_dt((r.get(date_field, "") if date_field else "") or "") or _EPOCH)
+
+    for row in rows:
+        message = (row.get(message_field, "") if message_field else "") or ""
+        host    = (row.get(host_field, "") if host_field else "") or ""
+        service = (row.get(service_field, "") if service_field else "") or ""
+        raw_status = (row.get(status_field, "") if status_field else "") or ""
+        explicit_status = _normalize_csv_severity(raw_status) if raw_status else ""
+
+        payload: dict[str, Any] = {
+            "message": message,
+            "level": explicit_status or _infer_severity_from_text(message),
+        }
+        payload.update(_extract_csv_attributes(message, last_entity, (host, service)))
+        if tags_field and row.get(tags_field):
+            payload["tags"] = row.get(tags_field)
+        for f in extra_fields:
+            v = row.get(f)
+            if v:
+                payload[f] = v
+
+        yield {
+            "timestamp": (row.get(date_field, "") if date_field else "") or "",
+            "severity": explicit_status or None,
+            "jsonPayload": payload,
+            "resource": {"labels": {"container_name": service, "pod_name": host}},
+        }
+
+
+def _is_csv_upload(data: bytes, filename: str | None) -> bool:
+    if filename and filename.lower().endswith(".csv"):
+        return True
+    stripped = data.lstrip()
+    return bool(stripped) and stripped[:1] not in (b"{", b"[")
+
+
 # ── upload ────────────────────────────────────────────────────────────────────
 
 @app.post("/upload")
@@ -259,10 +439,13 @@ async def upload(file: UploadFile = File(...)):
     global _store
 
     data = await file.read()
+    is_csv = _is_csv_upload(data, file.filename)
+    fmt = "datadog_csv" if is_csv else "gke_json"
     entries: list[dict] = []
     skipped = 0
 
-    for raw in _stream_entries(data):
+    source = _parse_datadog_csv(data) if is_csv else _stream_entries(data)
+    for raw in source:
         try:
             entries.append(_normalise(raw, len(entries)))
         except Exception:
@@ -295,9 +478,10 @@ async def upload(file: UploadFile = File(...)):
         "by_queue_message":  dict(by_qmsg),
         "skipped":           skipped,
         "parsed_at":         datetime.now(timezone.utc).isoformat(),
+        "format":            fmt,
     }
 
-    return {"total": len(entries), "skipped": skipped, "parsed_at": _store["parsed_at"]}
+    return {"total": len(entries), "skipped": skipped, "parsed_at": _store["parsed_at"], "format": fmt}
 
 
 # ── summary ───────────────────────────────────────────────────────────────────
@@ -310,6 +494,7 @@ def summary():
             "total": 0, "skipped": _store["skipped"],
             "severity_counts": {}, "containers": {}, "pods": {},
             "time_min": None, "time_max": None,
+            "format": _store.get("format"),
         }
     sev_counts: dict[str, int] = defaultdict(int)
     containers: dict[str, int] = defaultdict(int)
@@ -328,6 +513,7 @@ def summary():
         "time_min": min(timestamps) if timestamps else None,
         "time_max": max(timestamps) if timestamps else None,
         "parsed_at": _store["parsed_at"],
+        "format": _store.get("format"),
     }
 
 
@@ -605,7 +791,13 @@ def _build_error_list(matched: list[dict]) -> list[dict]:
         s = _entry_summary(e)
         st = e.get("_stack_trace", "")
         s["stack_trace"] = st          # full @x (already truncated in _entry_summary)
-        s["root_cause"]  = st.split("\n")[0].strip() if st else ""
+        # Structured GKE logs carry a Serilog @x stack trace; plain-text logs
+        # (e.g. Datadog CSV) don't, so fall back to a template of the message
+        # itself — this is what lets similar errors be grouped and counted as
+        # a likely-common root cause even without an exception field.
+        s["root_cause"] = (
+            st.split("\n")[0].strip() if st else _normalize_template(s.get("message", ""))
+        )
         result.append(s)
     return result
 
@@ -655,10 +847,13 @@ async def upload_compare(file: UploadFile = File(...)):
     global _compare_store
 
     data    = await file.read()
+    is_csv  = _is_csv_upload(data, file.filename)
+    fmt     = "datadog_csv" if is_csv else "gke_json"
     entries: list[dict] = []
     skipped = 0
 
-    for raw in _stream_entries(data):
+    source = _parse_datadog_csv(data) if is_csv else _stream_entries(data)
+    for raw in source:
         try:
             entries.append(_normalise(raw, len(entries)))
         except Exception:
@@ -673,8 +868,9 @@ async def upload_compare(file: UploadFile = File(...)):
         "entries":   entries,
         "skipped":   skipped,
         "parsed_at": datetime.now(timezone.utc).isoformat(),
+        "format":    fmt,
     }
-    return {"total": len(entries), "skipped": skipped, "parsed_at": _compare_store["parsed_at"]}
+    return {"total": len(entries), "skipped": skipped, "parsed_at": _compare_store["parsed_at"], "format": fmt}
 
 
 # ── compare ───────────────────────────────────────────────────────────────────

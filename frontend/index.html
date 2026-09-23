@@ -490,10 +490,10 @@
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
           <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
         </svg>
-        <p><strong>Drop JSON log file</strong></p>
-        <p>or click to browse</p>
+        <p><strong>Drop a log file</strong></p>
+        <p>JSON, NDJSON, or Datadog CSV export</p>
       </div>
-      <input type="file" id="file-input" accept=".json,.ndjson,.jsonl,.log">
+      <input type="file" id="file-input" accept=".json,.ndjson,.jsonl,.log,.csv">
       <div id="progress-bar-wrap"><div id="progress-bar"></div></div>
       <div id="progress-label"></div>
 
@@ -502,7 +502,7 @@
           <p><strong>Drop 2nd log file</strong></p>
           <p>or click to browse</p>
         </div>
-        <input type="file" id="compare-file-input" accept=".json,.ndjson,.jsonl,.log">
+        <input type="file" id="compare-file-input" accept=".json,.ndjson,.jsonl,.log,.csv">
         <div id="compare-status"></div>
       </div>
 
@@ -511,7 +511,7 @@
         <div class="sev-bar" id="sev-bars"></div>
       </div>
       <div class="side-section" id="containers-section" style="display:none">
-        <h3>Containers</h3>
+        <h3 id="lbl-containers-hdr">Containers</h3>
         <div class="container-list" id="containers-list"></div>
       </div>
       <div id="errors-btn-wrap" style="display:none">
@@ -527,7 +527,7 @@
           <polyline points="14 2 14 8 20 8"/>
           <line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
         </svg>
-        Upload a GKE JSON log file to get started
+        Upload a GKE JSON/NDJSON log file or a Datadog CSV export to get started
       </div>
 
       <div class="cards" id="summary-cards" style="display:none">
@@ -567,7 +567,7 @@
             </select>
           </div>
           <div class="filter-group">
-            <label>Container</label>
+            <label id="lbl-container-filter">Container</label>
             <select id="filter-container"><option value="">All</option></select>
           </div>
           <div class="filter-group">
@@ -598,7 +598,7 @@
           <table>
             <thead>
               <tr>
-                <th>Timestamp</th><th>Severity</th><th>Container</th>
+                <th>Timestamp</th><th>Severity</th><th id="lbl-container-th">Container</th>
                 <th>Logger</th><th>Action</th>
                 <th style="min-width:240px">Message / Exception / Scope</th>
                 <th>Request ID</th>
@@ -722,11 +722,27 @@ const API = 'http://127.0.0.1:8000';
 let state = {
   page: 1, pageSize: 50, totalEntries: 0,
   filters: {}, selectedIdx: null, currentTab: 'logs',
+  format: null,
 };
 let errorsLoaded  = false;
 let heatmapLoaded = false;
 let compareLoaded = false;
 let _errorsData   = null;
+
+// Datadog CSV logs map Service→"container" and Host→"pod" internally so the
+// existing GKE-oriented endpoints work unchanged; these swap the on-screen
+// labels back to what a Datadog user actually recognizes.
+function containerLabel() { return state.format === 'datadog_csv' ? 'Service' : 'Container'; }
+function podLabel()       { return state.format === 'datadog_csv' ? 'Host'    : 'Pod'; }
+
+function applyFieldLabels() {
+  const hdr = document.getElementById('lbl-containers-hdr');
+  const filt = document.getElementById('lbl-container-filter');
+  const th = document.getElementById('lbl-container-th');
+  if (hdr)  hdr.textContent  = containerLabel() + 's';
+  if (filt) filt.textContent = containerLabel();
+  if (th)   th.textContent   = containerLabel();
+}
 
 // ── upload ─────────────────────────────────────────────────────────────────
 
@@ -780,6 +796,8 @@ async function loadSummary() {
   let data;
   try { data = await fetch(`${API}/summary`).then(r => r.json()); }
   catch (e) { toast('Failed to load summary: ' + e.message, true); return; }
+  state.format = data.format || null;
+  applyFieldLabels();
   document.getElementById('card-total').textContent = (data.total || 0).toLocaleString();
   const errors   = (data.severity_counts?.ERROR || 0) + (data.severity_counts?.CRITICAL || 0);
   const warnings = data.severity_counts?.WARNING || 0;
@@ -1037,8 +1055,8 @@ async function selectEntry(idx) {
   const fields = [
     ['Severity',        `<span class="sev sev-${sev}">${sev}</span>`],
     ['Timestamp',       `<span class="dp-mono">${escHtml(fmtTs(m.timestamp))}</span>`],
-    ['Container',       m.container],
-    ['Pod',             m.pod],
+    [containerLabel(),  m.container],
+    [podLabel(),        m.pod],
     ['Logger',          m.logger],
     ['Action',          m.action],
     ['Message',         m.message ? `<span style="white-space:pre-wrap">${escHtml(m.message)}</span>` : ''],
@@ -1781,7 +1799,7 @@ function openHmHourDetail(hour, entries) {
     </div>
     <div class="hm-detail-body">
       <table>
-        <thead><tr><th>Time</th><th>Severity</th><th>Container</th><th>Message</th></tr></thead>
+        <thead><tr><th>Time</th><th>Severity</th><th>${containerLabel()}</th><th>Message</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
@@ -2183,7 +2201,7 @@ function buildManagerSummary(summary, errors) {
   if (firstError) {
     lines.push('First error observed:');
     lines.push(`  Time:      ${fmtDt(firstError.timestamp)}`);
-    lines.push(`  Container: ${firstError.container || 'N/A'}`);
+    lines.push(`  ${containerLabel()}: ${firstError.container || 'N/A'}`);
     lines.push(`  Message:   ${(firstError.message || '').slice(0, 200)}`);
     if (firstError.stack_trace) {
       lines.push(`  Exception: ${firstError.stack_trace.split('\n')[0].slice(0, 160)}`);
