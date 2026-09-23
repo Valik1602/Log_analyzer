@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GKE Log Analyzer</title>
+<title>Log Analyzer</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -464,7 +464,7 @@
       </svg>
       <div class="logo-text">
         <span class="brand">UNS</span>
-        <span class="product">GKE Log Analyzer</span>
+        <span class="product">Log Analyzer</span>
       </div>
     </div>
     <span class="pill">Local</span>
@@ -490,7 +490,7 @@
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
           <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
         </svg>
-        <p><strong>Drop a log file</strong></p>
+        <p><strong>Upload log file</strong></p>
         <p>JSON, NDJSON, or Datadog CSV export</p>
       </div>
       <input type="file" id="file-input" accept=".json,.ndjson,.jsonl,.log,.csv">
@@ -527,7 +527,7 @@
           <polyline points="14 2 14 8 20 8"/>
           <line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
         </svg>
-        Upload a GKE JSON/NDJSON log file or a Datadog CSV export to get started
+        Upload a JSON/NDJSON log file or a Datadog CSV export to get started
       </div>
 
       <div class="cards" id="summary-cards" style="display:none">
@@ -1619,7 +1619,7 @@ function toTxt(entries, filterDesc) {
   const now = new Date().toISOString().replace('T',' ').slice(0,16);
   const lines = [
     hr,
-    'GKE Log Analyzer — Export',
+    'Log Analyzer — Export',
     `Filter: ${filterDesc}`,
     `Total entries: ${entries.length}`,
     `Generated: ${now}`,
@@ -2090,7 +2090,7 @@ function buildManagerSummary(summary, errors) {
   const fmtDt = ts => ts ? fmtTs(ts) : 'N/A';
 
   // ── Header ──
-  lines.push('GKE LOG ANALYSIS — MANAGER SUMMARY');
+  lines.push('LOG ANALYSIS — MANAGER SUMMARY');
   lines.push(`Generated: ${new Date().toLocaleString()}`);
   lines.push(hr());
   lines.push('');
