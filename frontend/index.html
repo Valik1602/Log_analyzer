@@ -32,7 +32,6 @@
   .logo-mark { display: flex; align-items: center; gap: 8px; text-decoration: none; }
   .logo-icon { width: 28px; height: 28px; flex-shrink: 0; }
   .logo-text { display: flex; flex-direction: column; line-height: 1; }
-  .logo-text .brand { font-size: .6rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
   .logo-text .product { font-size: .92rem; font-weight: 700; white-space: nowrap; color: var(--text); letter-spacing: -.01em; }
   header .pill { font-size: .68rem; background: var(--accent); border-radius: 4px; padding: 2px 6px; white-space: nowrap; }
   #main { display: grid; grid-template-columns: 240px 1fr; overflow: hidden; }
@@ -463,7 +462,6 @@
         <path d="M19.5 18h3M21 16.5v3" stroke="#a5b4fc" stroke-width="1.1" stroke-linecap="round"/>
       </svg>
       <div class="logo-text">
-        <span class="brand">UNS</span>
         <span class="product">Log Analyzer</span>
       </div>
     </div>
@@ -927,6 +925,15 @@ function resetFilters() {
     const el = document.getElementById(id); if (el) el.classList.remove('active');
   });
   updateContainerActiveState();
+  // The header's global search (ExternalEventId/email/RequestId/free-text)
+  // is a separate query path from these filters — clear it too, and if its
+  // results tab is what's currently showing, switch back to Log Entries so
+  // Reset always lands the user on the full, unfiltered entry list.
+  document.getElementById('global-q').value = '';
+  const badge = document.getElementById('global-q-type');
+  badge.textContent = ''; badge.className = '';
+  document.getElementById('search-tab').style.display = 'none';
+  if (state.currentTab === 'search') switchTab('logs');
   state.filters = {}; state.page = 1; loadPage();
 }
 
