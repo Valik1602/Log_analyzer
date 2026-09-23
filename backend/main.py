@@ -15,6 +15,7 @@ import csv
 import io
 import json
 import re
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
@@ -362,7 +363,10 @@ def _extract_csv_attributes(content: str, last_entity: dict[tuple[str, str], str
 
 
 def _parse_datadog_csv(data: bytes):
-    """Yield raw GKE-shaped entries parsed from a Datadog CSV export."""
+    """Yield raw GKE-shaped entries parsed from a Datadog CSV export or any
+    other delimited log export whose columns loosely follow the same shape
+    (a timestamp, an optional host/machine and service/component, an
+    optional status/level, and a message/description)."""
     text = data.decode("utf-8-sig", errors="replace")
     reader = csv.DictReader(io.StringIO(text))
     if not reader.fieldnames:
@@ -376,11 +380,14 @@ def _parse_datadog_csv(data: bytes):
                 return field_map[n]
         return None
 
-    date_field    = pick("date", "timestamp", "time", "@timestamp")
-    host_field    = pick("host", "hostname")
-    service_field = pick("service", "service_name", "source")
-    status_field  = pick("status", "level", "severity")
-    message_field = pick("content", "message", "msg")
+    date_field    = pick("date", "timestamp", "time", "@timestamp", "datetime",
+                          "occurred", "occurred at", "event_time", "eventtime")
+    host_field    = pick("host", "hostname", "machine", "machine name", "computer",
+                          "node", "server")
+    service_field = pick("service", "service_name", "source", "component",
+                          "module", "application", "app", "process")
+    status_field  = pick("status", "level", "severity", "priority", "loglevel")
+    message_field = pick("content", "message", "msg", "description", "details", "text")
     tags_field    = pick("tags")
 
     consumed = {f for f in (date_field, host_field, service_field, status_field, message_field, tags_field) if f}
@@ -429,7 +436,443 @@ def _is_csv_upload(data: bytes, filename: str | None) -> bool:
     if filename and filename.lower().endswith(".csv"):
         return True
     stripped = data.lstrip()
-    return bool(stripped) and stripped[:1] not in (b"{", b"[")
+    if not stripped or stripped[:1] in (b"{", b"[", b"<"):
+        return False
+    first_line = stripped.split(b"\n", 1)[0].decode("utf-8", errors="replace")
+    return "," in first_line and not _line_starts_with_timestamp(first_line)
+
+
+# ── plain-text log support ──────────────────────────────────────────────────────
+# Custom in-house .log/.txt files: one entry starts on each line that begins
+# with a recognizable timestamp; any line that doesn't (e.g. a stack trace
+# frame) is appended to the previous entry's message instead of becoming its
+# own (timestamp-less, unattributable) entry.
+
+_TS_PATTERNS: list[tuple[re.Pattern, str]] = [
+    re.compile(r"^\[?(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\]?"),
+    re.compile(r"^\[(\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2} [+-]\d{4})\]"),
+    re.compile(r"^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\b"),
+    re.compile(r"^(\d{1,2}/\d{1,2}/\d{4}[ T]\d{1,2}:\d{2}:\d{2}(?:\s?[AP]M)?)"),
+]
+_TS_KINDS = ["iso", "apache", "syslog", "us"]
+
+_LEVEL_TOKEN_RE = re.compile(
+    r"\b(TRACE|DEBUG|INFO|NOTICE|WARN(?:ING)?|ERROR|CRIT(?:ICAL)?|FATAL|ALERT|EMERGENCY)\b"
+)
+
+
+def _line_starts_with_timestamp(line: str) -> bool:
+    return any(pattern.match(line) for pattern in _TS_PATTERNS)
+
+
+def _parse_plaintext_timestamp(raw: str, kind: str) -> str | None:
+    try:
+        if kind == "iso":
+            iso = raw.replace(" ", "T", 1) if "T" not in raw else raw
+            dt = datetime.fromisoformat(iso.replace(",", ".").replace("Z", "+00:00"))
+        elif kind == "apache":
+            dt = datetime.strptime(raw, "%d/%b/%Y:%H:%M:%S %z")
+        elif kind == "syslog":
+            # Syslog (RFC3164-style) has no year; assume the current one — best
+            # effort, since the raw text carries no better signal.
+            dt = datetime.strptime(f"{datetime.now(timezone.utc).year} {raw}", "%Y %b %d %H:%M:%S")
+        elif kind == "us":
+            fmt = "%m/%d/%Y %I:%M:%S %p" if re.search(r"[AP]M", raw, re.IGNORECASE) else "%m/%d/%Y %H:%M:%S"
+            dt = datetime.strptime(raw.replace("T", " "), fmt)
+        else:
+            return None
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _parse_plaintext_log(data: bytes):
+    """Yield raw GKE-shaped entries parsed from an unstructured .log/.txt file."""
+    text = data.decode("utf-8-sig", errors="replace")
+    last_entity: dict[tuple[str, str], str] = {}
+    buffered: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+
+    for line in text.splitlines():
+        if not line.strip() and current is None:
+            continue
+        matched = None
+        for pattern, kind in zip(_TS_PATTERNS, _TS_KINDS):
+            m = pattern.match(line)
+            if m:
+                iso = _parse_plaintext_timestamp(m.group(1), kind)
+                if iso:
+                    matched = (iso, m.end())
+                    break
+        if matched:
+            if current is not None:
+                buffered.append(current)
+            iso, end = matched
+            rest = line[end:].lstrip(" -:\t")
+            level_m = _LEVEL_TOKEN_RE.search(rest[:40])
+            if level_m:
+                severity = _normalize_csv_severity(level_m.group(1))
+                if level_m.start() <= 1:
+                    # Level token sits right after the timestamp — strip it so
+                    # it isn't duplicated between the severity badge and the
+                    # message. If it fills an enclosing [..]/(..), drop that
+                    # too; otherwise leave surrounding brackets alone (they
+                    # likely belong to the next token, e.g. "[ServiceName]").
+                    start, end = level_m.start(), level_m.end()
+                    if start > 0 and rest[start - 1] in "([" and end < len(rest) and rest[end] in ")]":
+                        start -= 1
+                        end += 1
+                    rest = (rest[:start] + rest[end:]).lstrip(" \t:-")
+            else:
+                severity = _infer_severity_from_text(rest)
+            current = {"timestamp": iso, "message": rest, "severity": severity}
+        elif current is not None:
+            current["message"] += "\n" + line
+        # A line before any timestamp has been seen can't be attributed to an
+        # entry, so it's dropped — same "skip what can't be parsed" behaviour
+        # as malformed NDJSON lines.
+    if current is not None:
+        buffered.append(current)
+
+    for entry in buffered:
+        message = entry["message"]
+        payload: dict[str, Any] = {"message": message, "level": entry["severity"]}
+        payload.update(_extract_csv_attributes(message, last_entity, ("", "")))
+        yield {
+            "timestamp": entry["timestamp"],
+            "severity": entry["severity"],
+            "jsonPayload": payload,
+            "resource": {"labels": {"container_name": "", "pod_name": ""}},
+        }
+
+
+# ── Windows Event Log support (CSV / XML exports) ──────────────────────────────
+
+_WIN_EVT_HEADER_TOKENS = (
+    "entrytype", "leveldisplayname", "eventid", "event id", "providername",
+    "instanceid", "timecreated", "timegenerated", "machinename",
+)
+
+
+def _looks_like_windows_event_csv(first_line: str) -> bool:
+    lower = first_line.lower()
+    return sum(1 for tok in _WIN_EVT_HEADER_TOKENS if tok in lower) >= 2
+
+
+_WIN_TIME_FORMATS = (
+    "%m/%d/%Y %I:%M:%S %p",
+    "%m/%d/%Y %H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S.%fZ",
+    "%Y-%m-%dT%H:%M:%SZ",
+    "%Y-%m-%d %H:%M:%S",
+)
+
+
+def _normalize_win_evt_timestamp(raw: str) -> str:
+    raw = raw.strip()
+    if not raw:
+        return ""
+    for fmt in _WIN_TIME_FORMATS:
+        try:
+            dt = datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat().replace("+00:00", "Z")
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat().replace("+00:00", "Z")
+    except ValueError:
+        return raw
+
+
+def _parse_windows_event_csv(data: bytes):
+    """Yield raw GKE-shaped entries from a Get-WinEvent/Get-EventLog CSV export."""
+    text = data.decode("utf-8-sig", errors="replace")
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        return
+
+    field_map = {f.strip().lower(): f for f in reader.fieldnames if f}
+
+    def pick(*names: str) -> str | None:
+        for n in names:
+            if n in field_map:
+                return field_map[n]
+        return None
+
+    time_field    = pick("timecreated", "time created", "timegenerated", "time generated", "time", "date and time")
+    level_field   = pick("leveldisplayname", "entrytype", "level")
+    id_field      = pick("id", "eventid", "event id", "instanceid")
+    source_field  = pick("providername", "provider name", "source")
+    host_field    = pick("machinename", "machine name", "computer")
+    message_field = pick("message", "description")
+
+    consumed = {f for f in (time_field, level_field, id_field, source_field, host_field, message_field) if f}
+    extra_fields = [f for f in reader.fieldnames if f and f not in consumed]
+
+    _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    rows = [row for row in reader if row is not None]
+    rows.sort(key=lambda r: _parse_dt(_normalize_win_evt_timestamp(
+        (r.get(time_field, "") if time_field else "") or "")) or _EPOCH)
+
+    last_entity: dict[tuple[str, str], str] = {}
+
+    for row in rows:
+        raw_time = (row.get(time_field, "") if time_field else "") or ""
+        iso = _normalize_win_evt_timestamp(raw_time)
+        raw_level = (row.get(level_field, "") if level_field else "") or ""
+        severity = _normalize_csv_severity(raw_level) if raw_level else "INFO"
+        source = (row.get(source_field, "") if source_field else "") or ""
+        host = (row.get(host_field, "") if host_field else "") or ""
+        message = (row.get(message_field, "") if message_field else "") or ""
+        event_id = (row.get(id_field, "") if id_field else "") or ""
+
+        payload: dict[str, Any] = {"message": message, "level": severity}
+        payload.update(_extract_csv_attributes(message, last_entity, (source, host)))
+        if event_id:
+            # EventID is the standard way L2/L3 engineers triage Windows logs
+            # ("show me every occurrence of 4625") — it's a more reliable
+            # correlation key here than anything free-text extraction finds.
+            payload["ExternalEventId"] = f"EventID {event_id}"
+            payload["EventID"] = event_id
+        for f in extra_fields:
+            v = row.get(f)
+            if v:
+                payload[f] = v
+
+        yield {
+            "timestamp": iso,
+            "severity": None,
+            "jsonPayload": payload,
+            "resource": {"labels": {"container_name": source, "pod_name": host}},
+        }
+
+
+_WIN_XML_NS = "{http://schemas.microsoft.com/win/2004/08/events/event}"
+_WIN_XML_LEVEL_MAP = {"0": "INFO", "1": "CRITICAL", "2": "ERROR", "3": "WARNING", "4": "INFO", "5": "DEBUG"}
+
+
+def _win_evt_child(el: ET.Element | None, name: str) -> ET.Element | None:
+    return el.find(f"{_WIN_XML_NS}{name}") if el is not None else None
+
+
+def _parse_windows_event_xml(data: bytes):
+    """Yield raw GKE-shaped entries from a Windows Event Log XML export.
+
+    Handles both a single <Event>, a proper <Events><Event/>...</Events>
+    document, and the common case of several <Event>...</Event> blocks
+    concatenated without any wrapping root (not valid XML on its own —
+    retried by synthesizing a root).
+    """
+    text = data.decode("utf-8-sig", errors="replace").strip()
+    if not text:
+        return
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        try:
+            root = ET.fromstring(f"<Events>{text}</Events>")
+        except ET.ParseError:
+            return
+
+    root_tag = root.tag.rsplit("}", 1)[-1]
+    events = [root] if root_tag == "Event" else list(root)
+
+    last_entity: dict[tuple[str, str], str] = {}
+
+    for ev in events:
+        if ev.tag.rsplit("}", 1)[-1] != "Event":
+            continue
+        system = _win_evt_child(ev, "System")
+        if system is None:
+            continue
+
+        provider = _win_evt_child(system, "Provider")
+        provider_name = provider.get("Name", "") if provider is not None else ""
+        event_id_el = _win_evt_child(system, "EventID")
+        event_id = (event_id_el.text or "").strip() if event_id_el is not None else ""
+        level_el = _win_evt_child(system, "Level")
+        level_raw = (level_el.text or "").strip() if level_el is not None else ""
+        severity = _WIN_XML_LEVEL_MAP.get(level_raw, "INFO")
+        time_el = _win_evt_child(system, "TimeCreated")
+        raw_time = time_el.get("SystemTime", "") if time_el is not None else ""
+        iso = _normalize_win_evt_timestamp(raw_time)
+        computer_el = _win_evt_child(system, "Computer")
+        computer = (computer_el.text or "").strip() if computer_el is not None else ""
+        channel_el = _win_evt_child(system, "Channel")
+        channel = (channel_el.text or "").strip() if channel_el is not None else ""
+
+        # Raw XML exports rarely include the rendered message text; fall back
+        # to reconstructing one from the EventData Name=Value pairs.
+        message = ""
+        rendering = _win_evt_child(ev, "RenderingInfo")
+        if rendering is not None:
+            msg_el = _win_evt_child(rendering, "Message")
+            if msg_el is not None and msg_el.text:
+                message = msg_el.text.strip()
+        if not message:
+            event_data = _win_evt_child(ev, "EventData")
+            pairs = []
+            if event_data is not None:
+                for d in event_data.findall(f"{_WIN_XML_NS}Data"):
+                    name = d.get("Name", "")
+                    val = (d.text or "").strip()
+                    pairs.append(f"{name}={val}" if name else val)
+            detail = "; ".join(p for p in pairs if p)
+            message = f"Event {event_id} ({provider_name})" + (f": {detail}" if detail else "")
+
+        payload: dict[str, Any] = {"message": message, "level": severity}
+        payload.update(_extract_csv_attributes(message, last_entity, (provider_name, computer)))
+        if event_id:
+            payload["ExternalEventId"] = f"EventID {event_id}"
+            payload["EventID"] = event_id
+        if channel:
+            payload["Channel"] = channel
+
+        yield {
+            "timestamp": iso,
+            "severity": None,
+            "jsonPayload": payload,
+            "resource": {"labels": {"container_name": provider_name, "pod_name": computer}},
+        }
+
+
+# ── AWS CloudWatch Logs support (JSON exports) ──────────────────────────────────
+# Recognizes: `aws logs filter-log-events` output ({"events":[...]});
+# subscription/export dumps ({"logEvents":[...], "logGroup":..., "logStream":...});
+# CloudWatch Logs Insights query results exported as JSON
+# ([[{"field":"@timestamp","value":...}, ...], ...]); and a batch (list) of any
+# of the dict shapes above.
+
+def _cloudwatch_ms_to_iso(ts_ms: Any) -> str:
+    if not isinstance(ts_ms, (int, float)):
+        return ""
+    try:
+        return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except (ValueError, OSError, OverflowError):
+        return ""
+
+
+def _cloudwatch_insights_ts_to_iso(raw: str) -> str:
+    if not raw:
+        return ""
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(raw, fmt)
+            return dt.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+        except ValueError:
+            continue
+    return raw
+
+
+def _cloudwatch_events_to_entries(events: list, log_group: str, log_stream: str):
+    last_entity: dict[tuple[str, str], str] = {}
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        # `aws logs filter-log-events` puts logStreamName on each event
+        # rather than at the top level; prefer it when present.
+        stream = ev.get("logStreamName") or log_stream
+        message = str(ev.get("message", "") or "")
+        iso = _cloudwatch_ms_to_iso(ev.get("timestamp"))
+        payload: dict[str, Any] = {"message": message, "level": _infer_severity_from_text(message)}
+        payload.update(_extract_csv_attributes(message, last_entity, (log_group, stream)))
+        yield {
+            "timestamp": iso,
+            "severity": None,
+            "jsonPayload": payload,
+            "resource": {"labels": {"container_name": log_group, "pod_name": stream}},
+        }
+
+
+def _cloudwatch_insights_to_entries(rows: list):
+    last_entity: dict[tuple[str, str], str] = {}
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        fields = {f.get("field"): f.get("value") for f in row if isinstance(f, dict)}
+        message = fields.get("@message", "") or ""
+        log_stream = fields.get("@logStream", "") or ""
+        iso = _cloudwatch_insights_ts_to_iso(fields.get("@timestamp", ""))
+        payload: dict[str, Any] = {"message": message, "level": _infer_severity_from_text(message)}
+        payload.update(_extract_csv_attributes(message, last_entity, ("", log_stream)))
+        for k, v in fields.items():
+            if k not in ("@timestamp", "@message", "@logStream", "@ptr") and v:
+                payload[k] = v
+        yield {
+            "timestamp": iso,
+            "severity": None,
+            "jsonPayload": payload,
+            "resource": {"labels": {"container_name": "", "pod_name": log_stream}},
+        }
+
+
+def _as_cloudwatch_entries(obj: Any):
+    """Return a generator of raw GKE-shaped entries if `obj` looks like one of
+    the known CloudWatch JSON export shapes, else None (caller falls back to
+    treating the upload as GKE-style JSON)."""
+    if isinstance(obj, dict):
+        events = obj.get("logEvents") if isinstance(obj.get("logEvents"), list) else obj.get("events")
+        if isinstance(events, list) and events and isinstance(events[0], dict) \
+                and "message" in events[0] and "timestamp" in events[0]:
+            log_group  = obj.get("logGroup") or obj.get("logGroupName") or ""
+            log_stream = obj.get("logStream") or obj.get("logStreamName") or ""
+            return _cloudwatch_events_to_entries(events, log_group, log_stream)
+        return None
+
+    if isinstance(obj, list) and obj:
+        first = obj[0]
+        if isinstance(first, list) and first and isinstance(first[0], dict) \
+                and "field" in first[0] and "value" in first[0]:
+            return _cloudwatch_insights_to_entries(obj)
+        if isinstance(first, dict) and ("logEvents" in first or "events" in first):
+            def _gen():
+                for item in obj:
+                    sub = _as_cloudwatch_entries(item)
+                    if sub is not None:
+                        yield from sub
+            return _gen()
+
+    return None
+
+
+# ── format detection ─────────────────────────────────────────────────────────
+
+def _detect_and_parse(data: bytes, filename: str | None) -> tuple[Any, str]:
+    """Sniff an upload's shape and return (entries_iterator, format_name)."""
+    stripped = data.lstrip()
+    if not stripped:
+        return iter(()), "gke_json"
+
+    first_byte = stripped[:1]
+
+    if first_byte in (b"{", b"["):
+        try:
+            obj = json.loads(stripped)
+        except (json.JSONDecodeError, RecursionError):
+            obj = None
+        if obj is not None:
+            cw = _as_cloudwatch_entries(obj)
+            if cw is not None:
+                return cw, "cloudwatch_json"
+        return _stream_entries(data), "gke_json"
+
+    if first_byte == b"<":
+        return _parse_windows_event_xml(data), "windows_event_xml"
+
+    if _is_csv_upload(data, filename):
+        first_line = stripped.split(b"\n", 1)[0].decode("utf-8", errors="replace")
+        if _looks_like_windows_event_csv(first_line):
+            return _parse_windows_event_csv(data), "windows_event_csv"
+        return _parse_datadog_csv(data), "csv"
+
+    return _parse_plaintext_log(data), "plaintext"
 
 
 # ── upload ────────────────────────────────────────────────────────────────────
@@ -439,12 +882,10 @@ async def upload(file: UploadFile = File(...)):
     global _store
 
     data = await file.read()
-    is_csv = _is_csv_upload(data, file.filename)
-    fmt = "datadog_csv" if is_csv else "gke_json"
+    source, fmt = _detect_and_parse(data, file.filename)
     entries: list[dict] = []
     skipped = 0
 
-    source = _parse_datadog_csv(data) if is_csv else _stream_entries(data)
     for raw in source:
         try:
             entries.append(_normalise(raw, len(entries)))
@@ -847,12 +1288,10 @@ async def upload_compare(file: UploadFile = File(...)):
     global _compare_store
 
     data    = await file.read()
-    is_csv  = _is_csv_upload(data, file.filename)
-    fmt     = "datadog_csv" if is_csv else "gke_json"
+    source, fmt = _detect_and_parse(data, file.filename)
     entries: list[dict] = []
     skipped = 0
 
-    source = _parse_datadog_csv(data) if is_csv else _stream_entries(data)
     for raw in source:
         try:
             entries.append(_normalise(raw, len(entries)))

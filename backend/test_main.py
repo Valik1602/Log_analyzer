@@ -17,22 +17,29 @@ from fastapi.testclient import TestClient
 
 from main import (
     _action_field,
+    _as_cloudwatch_entries,
     _build_error_list,
     _build_error_summary,
     _build_event_groups,
     _contains_str,
     _container,
     _connection_id,
+    _detect_and_parse,
     _detect_query_type,
     _external_event_id,
     _infer_severity_from_text,
     _is_csv_upload,
+    _looks_like_windows_event_csv,
     _message,
     _normalise,
     _normalize_csv_severity,
     _normalize_template,
+    _normalize_win_evt_timestamp,
     _parse_datadog_csv,
     _parse_dt,
+    _parse_plaintext_log,
+    _parse_windows_event_csv,
+    _parse_windows_event_xml,
     _pod,
     _queue_message_id,
     _request_id,
@@ -901,7 +908,7 @@ class TestUploadEndpointCsv:
         assert resp.status_code == 200
         data = resp.json()
         assert data["total"] == 2
-        assert data["format"] == "datadog_csv"
+        assert data["format"] == "csv"
 
     def test_json_upload_reports_gke_format(self):
         data = _upload_entries([_gke_entry()])
@@ -920,3 +927,334 @@ class TestUploadEndpointCsv:
         summary = search["error_summary"]
         assert len(summary) == 1
         assert summary[0]["count"] == 2
+
+
+# ─────────────────────────── Plain-text log support ────────────────────────────
+
+class TestParsePlaintextLog:
+    def test_iso_timestamp_and_level_token_parsed(self):
+        text = b"2026-09-23T10:15:32.123Z ERROR [PaymentService] Failed to charge card\n"
+        entries = [_normalise(r, i) for i, r in enumerate(_parse_plaintext_log(text))]
+        assert len(entries) == 1
+        assert entries[0]["_ts"] == "2026-09-23T10:15:32.123000Z"
+        assert entries[0]["_severity"] == "ERROR"
+        assert entries[0]["_message"] == "[PaymentService] Failed to charge card"
+
+    def test_bracketed_level_token_stripped_cleanly(self):
+        text = b"2026-09-23T10:18:00Z [ERROR] Bracketed level token test\n"
+        entries = [_normalise(r, i) for i, r in enumerate(_parse_plaintext_log(text))]
+        assert entries[0]["_severity"] == "ERROR"
+        assert entries[0]["_message"] == "Bracketed level token test"
+
+    def test_continuation_lines_attach_to_previous_entry(self):
+        text = (
+            b"2026-09-23T10:15:32Z ERROR boom\n"
+            b"   at A.b(A.java:1)\n"
+            b"   at C.d(C.java:2)\n"
+            b"2026-09-23T10:15:33Z INFO next entry\n"
+        )
+        entries = [_normalise(r, i) for i, r in enumerate(_parse_plaintext_log(text))]
+        assert len(entries) == 2
+        assert "at A.b(A.java:1)" in entries[0]["_message"]
+        assert "at C.d(C.java:2)" in entries[0]["_message"]
+        assert entries[1]["_message"] == "next entry"
+
+    def test_syslog_timestamp_parsed(self):
+        text = b"Sep 23 10:15:34 host1 sshd[1234]: Failed password for invalid user admin\n"
+        entries = [_normalise(r, i) for i, r in enumerate(_parse_plaintext_log(text))]
+        assert len(entries) == 1
+        assert entries[0]["_ts"].startswith(f"{__import__('datetime').datetime.now().year}-09-23T10:15:34")
+        assert entries[0]["_severity"] == "ERROR"  # inferred from "Failed"
+
+    def test_bracketed_iso_timestamp_parsed(self):
+        text = b"[2026-09-23 10:16:00] WARNING Disk usage above threshold\n"
+        entries = [_normalise(r, i) for i, r in enumerate(_parse_plaintext_log(text))]
+        assert entries[0]["_ts"] == "2026-09-23T10:16:00Z"
+        assert entries[0]["_severity"] == "WARNING"
+
+    def test_us_style_timestamp_with_am_pm_parsed(self):
+        text = b"09/23/2026 10:17:00 AM CRITICAL Node unreachable\n"
+        entries = [_normalise(r, i) for i, r in enumerate(_parse_plaintext_log(text))]
+        assert entries[0]["_ts"] == "2026-09-23T10:17:00Z"
+        assert entries[0]["_severity"] == "CRITICAL"
+
+    def test_request_id_extracted_from_message(self):
+        text = b"2026-09-23T10:00:00Z ERROR charge failed request_id=abc-123\n"
+        entries = [_normalise(r, i) for i, r in enumerate(_parse_plaintext_log(text))]
+        assert entries[0]["_request_id"] == "abc-123"
+
+    def test_lines_before_any_timestamp_are_dropped(self):
+        text = b"garbage preamble with no timestamp\n2026-09-23T10:00:00Z INFO real entry\n"
+        entries = [_normalise(r, i) for i, r in enumerate(_parse_plaintext_log(text))]
+        assert len(entries) == 1
+        assert entries[0]["_message"] == "real entry"
+
+    def test_empty_input_yields_no_entries(self):
+        assert list(_parse_plaintext_log(b"")) == []
+
+
+# ─────────────────────────── Windows Event Log support ─────────────────────────
+
+class TestLooksLikeWindowsEventCsv:
+    def test_get_winevent_header_detected(self):
+        assert _looks_like_windows_event_csv(
+            "TimeCreated,Id,LevelDisplayName,ProviderName,MachineName,Message") is True
+
+    def test_datadog_header_not_detected(self):
+        assert _looks_like_windows_event_csv("Date,Host,Service,Content") is False
+
+    def test_single_token_hit_not_enough(self):
+        assert _looks_like_windows_event_csv("Date,Level,Message") is False
+
+
+class TestNormalizeWinEvtTimestamp:
+    def test_us_am_pm_format(self):
+        assert _normalize_win_evt_timestamp("9/23/2026 10:15:32 AM") == "2026-09-23T10:15:32Z"
+
+    def test_iso_with_offset(self):
+        assert _normalize_win_evt_timestamp("2026-09-23T10:15:32.1234567Z").startswith("2026-09-23T10:15:32")
+
+    def test_empty_string(self):
+        assert _normalize_win_evt_timestamp("") == ""
+
+    def test_unparseable_passed_through(self):
+        assert _normalize_win_evt_timestamp("not a date") == "not a date"
+
+
+class TestParseWindowsEventCsv:
+    def test_basic_columns_mapped(self):
+        csv_text = (
+            "TimeCreated,Id,LevelDisplayName,ProviderName,MachineName,Message\n"
+            '9/23/2026 10:15:32 AM,4625,Error,Microsoft-Windows-Security-Auditing,'
+            'SERVER01,"An account failed to log on."\n'
+        )
+        entries = [_normalise(r, i) for i, r in enumerate(_parse_windows_event_csv(csv_text.encode()))]
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["_ts"] == "2026-09-23T10:15:32Z"
+        assert e["_severity"] == "ERROR"
+        assert e["_container"] == "Microsoft-Windows-Security-Auditing"
+        assert e["_pod"] == "SERVER01"
+        assert e["_external_event_id"] == "EventID 4625"
+        assert e["_message"] == "An account failed to log on."
+
+    def test_same_event_id_groups_together(self):
+        csv_text = (
+            "TimeCreated,Id,LevelDisplayName,ProviderName,MachineName,Message\n"
+            '9/23/2026 10:15:32 AM,4625,Error,Auditing,S1,"failed logon 1"\n'
+            '9/23/2026 10:16:00 AM,4625,Error,Auditing,S1,"failed logon 2"\n'
+            '9/23/2026 10:17:00 AM,7036,Information,SCM,S1,"service started"\n'
+        )
+        entries = [_normalise(r, i) for i, r in enumerate(_parse_windows_event_csv(csv_text.encode()))]
+        ids = [e["_external_event_id"] for e in entries]
+        assert ids.count("EventID 4625") == 2
+        assert ids.count("EventID 7036") == 1
+
+    def test_entries_sorted_chronologically(self):
+        csv_text = (
+            "TimeCreated,Id,LevelDisplayName,ProviderName,MachineName,Message\n"
+            '9/23/2026 10:17:00 AM,1,Information,P,S1,"third"\n'
+            '9/23/2026 10:15:00 AM,1,Information,P,S1,"first"\n'
+            '9/23/2026 10:16:00 AM,1,Information,P,S1,"second"\n'
+        )
+        entries = list(_parse_windows_event_csv(csv_text.encode()))
+        msgs = [e["jsonPayload"]["message"] for e in entries]
+        assert msgs == ["first", "second", "third"]
+
+    def test_empty_csv_yields_no_entries(self):
+        assert list(_parse_windows_event_csv(b"")) == []
+
+
+class TestParseWindowsEventXml:
+    _SINGLE_EVENT = (
+        '<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">'
+        '<System><Provider Name="Microsoft-Windows-Security-Auditing"/>'
+        '<EventID>4625</EventID><Level>2</Level>'
+        '<TimeCreated SystemTime="2026-09-23T10:15:32.1234567Z"/>'
+        '<Computer>SERVER01.domain.local</Computer><Channel>Security</Channel></System>'
+        '<EventData><Data Name="TargetUserName">admin</Data>'
+        '<Data Name="IpAddress">10.0.0.5</Data></EventData></Event>'
+    )
+
+    def test_single_event_parsed(self):
+        entries = [_normalise(r, i) for i, r in enumerate(_parse_windows_event_xml(self._SINGLE_EVENT.encode()))]
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["_severity"] == "ERROR"
+        assert e["_container"] == "Microsoft-Windows-Security-Auditing"
+        assert e["_pod"] == "SERVER01.domain.local"
+        assert e["_external_event_id"] == "EventID 4625"
+        assert "TargetUserName=admin" in e["_message"]
+
+    def test_concatenated_events_without_root_wrapper(self):
+        blob = (self._SINGLE_EVENT + self._SINGLE_EVENT.replace("4625", "7036")).encode()
+        entries = list(_parse_windows_event_xml(blob))
+        assert len(entries) == 2
+
+    def test_events_wrapped_in_events_root(self):
+        blob = f"<Events>{self._SINGLE_EVENT}</Events>".encode()
+        entries = list(_parse_windows_event_xml(blob))
+        assert len(entries) == 1
+
+    def test_malformed_xml_yields_no_entries_without_crashing(self):
+        assert list(_parse_windows_event_xml(b"<Event><System>")) == []
+
+    def test_empty_input_yields_no_entries(self):
+        assert list(_parse_windows_event_xml(b"")) == []
+
+    def test_level_mapping(self):
+        for level, expected in [("1", "CRITICAL"), ("3", "WARNING"), ("4", "INFO"), ("5", "DEBUG")]:
+            blob = self._SINGLE_EVENT.replace("<Level>2</Level>", f"<Level>{level}</Level>").encode()
+            entries = list(_parse_windows_event_xml(blob))
+            assert entries[0]["jsonPayload"]["level"] == expected
+
+
+# ─────────────────────────── AWS CloudWatch Logs support ───────────────────────
+
+class TestAsCloudwatchEntries:
+    def test_filter_log_events_shape_detected(self):
+        obj = {"events": [{"timestamp": 1758619200000, "message": "boom", "logStreamName": "s1"}]}
+        gen = _as_cloudwatch_entries(obj)
+        assert gen is not None
+        entries = list(gen)
+        assert len(entries) == 1
+        assert entries[0]["resource"]["labels"]["pod_name"] == "s1"
+
+    def test_log_events_shape_with_log_group_detected(self):
+        obj = {
+            "logGroup": "/aws/lambda/fn", "logStream": "stream-1",
+            "logEvents": [{"id": "1", "timestamp": 1758619200000, "message": "START"}],
+        }
+        entries = list(_as_cloudwatch_entries(obj))
+        assert entries[0]["resource"]["labels"]["container_name"] == "/aws/lambda/fn"
+        assert entries[0]["resource"]["labels"]["pod_name"] == "stream-1"
+
+    def test_insights_export_shape_detected(self):
+        obj = [[
+            {"field": "@timestamp", "value": "2026-09-23 10:15:32.123"},
+            {"field": "@message", "value": "ERROR something broke"},
+            {"field": "@logStream", "value": "stream-1"},
+        ]]
+        entries = list(_as_cloudwatch_entries(obj))
+        assert len(entries) == 1
+        assert entries[0]["jsonPayload"]["message"] == "ERROR something broke"
+        assert entries[0]["resource"]["labels"]["pod_name"] == "stream-1"
+
+    def test_batch_of_log_events_dicts_detected(self):
+        obj = [
+            {"logGroup": "g1", "logStream": "s1", "logEvents": [{"timestamp": 1758619200000, "message": "a"}]},
+            {"logGroup": "g2", "logStream": "s2", "logEvents": [{"timestamp": 1758619200000, "message": "b"}]},
+        ]
+        entries = list(_as_cloudwatch_entries(obj))
+        assert len(entries) == 2
+
+    def test_non_cloudwatch_dict_returns_none(self):
+        assert _as_cloudwatch_entries({"timestamp": "x", "severity": "INFO", "jsonPayload": {}}) is None
+
+    def test_non_cloudwatch_list_returns_none(self):
+        assert _as_cloudwatch_entries([{"timestamp": "x", "jsonPayload": {}}]) is None
+
+    def test_empty_list_returns_none(self):
+        assert _as_cloudwatch_entries([]) is None
+
+    def test_per_event_log_stream_overrides_top_level(self):
+        obj = {"events": [{"timestamp": 1758619200000, "message": "m", "logStreamName": "per-event"}]}
+        entries = list(_as_cloudwatch_entries(obj))
+        assert entries[0]["resource"]["labels"]["pod_name"] == "per-event"
+
+
+# ─────────────────────────── Format detection dispatcher ───────────────────────
+
+class TestDetectAndParse:
+    def test_gke_json_array_detected(self):
+        data = json.dumps([_gke_entry()]).encode()
+        _, fmt = _detect_and_parse(data, "logs.json")
+        assert fmt == "gke_json"
+
+    def test_cloudwatch_json_detected(self):
+        data = json.dumps({"events": [{"timestamp": 1758619200000, "message": "m"}]}).encode()
+        _, fmt = _detect_and_parse(data, "export.json")
+        assert fmt == "cloudwatch_json"
+
+    def test_windows_event_xml_detected(self):
+        data = b'<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System/></Event>'
+        _, fmt = _detect_and_parse(data, "events.xml")
+        assert fmt == "windows_event_xml"
+
+    def test_windows_event_csv_detected_by_header(self):
+        data = b"TimeCreated,Id,LevelDisplayName,ProviderName,MachineName,Message\n"
+        _, fmt = _detect_and_parse(data, "events.csv")
+        assert fmt == "windows_event_csv"
+
+    def test_datadog_csv_detected(self):
+        data = b"Date,Host,Service,Content\n"
+        _, fmt = _detect_and_parse(data, "export.csv")
+        assert fmt == "csv"
+
+    def test_plaintext_fallback_for_unrecognized_log_file(self):
+        data = b"2026-09-23T10:00:00Z INFO plain log line\n"
+        _, fmt = _detect_and_parse(data, "app.log")
+        assert fmt == "plaintext"
+
+    def test_empty_upload_defaults_to_gke_json(self):
+        entries, fmt = _detect_and_parse(b"", "empty.log")
+        assert fmt == "gke_json"
+        assert list(entries) == []
+
+    def test_malformed_json_falls_back_to_gke_stream_parser(self):
+        # Not valid JSON overall, but _stream_entries still salvages what it can.
+        entries, fmt = _detect_and_parse(b"{not valid json", "bad.json")
+        assert fmt == "gke_json"
+        assert list(entries) == []
+
+
+class TestUploadEndpointAdditionalFormats:
+    def test_windows_event_csv_upload(self):
+        csv_text = (
+            "TimeCreated,Id,LevelDisplayName,ProviderName,MachineName,Message\n"
+            '9/23/2026 10:15:32 AM,4625,Error,Auditing,S1,"failed logon"\n'
+        )
+        resp = client.post("/upload", files={"file": ("events.csv", csv_text.encode(), "text/csv")})
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["format"] == "windows_event_csv"
+
+    def test_windows_event_xml_upload(self):
+        xml_text = (
+            '<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">'
+            '<System><Provider Name="P"/><EventID>1</EventID><Level>2</Level>'
+            '<TimeCreated SystemTime="2026-09-23T10:15:32Z"/><Computer>C1</Computer></System>'
+            "</Event>"
+        )
+        resp = client.post("/upload", files={"file": ("events.xml", xml_text.encode(), "text/xml")})
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["format"] == "windows_event_xml"
+
+    def test_cloudwatch_json_upload(self):
+        payload = json.dumps({"events": [{"timestamp": 1758619200000, "message": "boom"}]}).encode()
+        resp = client.post("/upload", files={"file": ("export.json", payload, "application/json")})
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["format"] == "cloudwatch_json"
+
+    def test_plaintext_log_upload(self):
+        text = b"2026-09-23T10:00:00Z ERROR something broke\n2026-09-23T10:00:01Z INFO recovered\n"
+        resp = client.post("/upload", files={"file": ("app.log", text, "text/plain")})
+        data = resp.json()
+        assert data["total"] == 2
+        assert data["format"] == "plaintext"
+
+    def test_generic_csv_with_nonstandard_columns_upload(self):
+        csv_text = (
+            "Occurred,Machine,Component,Severity,Description\n"
+            "2026-09-23 10:00:00,web-01,checkout,Error,Payment gateway timeout\n"
+        )
+        resp = client.post("/upload", files={"file": ("app.csv", csv_text.encode(), "text/csv")})
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["format"] == "csv"
+        entries = client.get("/entries?page=1&page_size=10").json()["entries"]
+        assert entries[0]["container"] == "checkout"
+        assert entries[0]["pod"] == "web-01"
+        assert entries[0]["severity"] == "ERROR"

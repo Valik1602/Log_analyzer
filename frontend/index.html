@@ -470,7 +470,7 @@
     <!-- Global search -->
     <div id="global-search">
       <input type="text" id="global-q"
-             placeholder="Search: ExternalEventId, email, RequestId, QueueMessageId…"
+             placeholder="Search…"
              autocomplete="off" spellcheck="false">
       <span id="global-q-type"></span>
       <button class="btn sm" onclick="globalSearch()">Search</button>
@@ -489,9 +489,9 @@
           <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
         </svg>
         <p><strong>Upload log file</strong></p>
-        <p>JSON, NDJSON, or Datadog CSV export</p>
+        <p>JSON, CSV, XML, or plain-text logs</p>
       </div>
-      <input type="file" id="file-input" accept=".json,.ndjson,.jsonl,.log,.csv">
+      <input type="file" id="file-input" accept=".json,.ndjson,.jsonl,.log,.csv,.xml,.txt">
       <div id="progress-bar-wrap"><div id="progress-bar"></div></div>
       <div id="progress-label"></div>
 
@@ -500,7 +500,7 @@
           <p><strong>Drop 2nd log file</strong></p>
           <p>or click to browse</p>
         </div>
-        <input type="file" id="compare-file-input" accept=".json,.ndjson,.jsonl,.log,.csv">
+        <input type="file" id="compare-file-input" accept=".json,.ndjson,.jsonl,.log,.csv,.xml,.txt">
         <div id="compare-status"></div>
       </div>
 
@@ -525,7 +525,7 @@
           <polyline points="14 2 14 8 20 8"/>
           <line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
         </svg>
-        Upload a JSON/NDJSON log file or a Datadog CSV export to get started
+        Upload a log file — GKE JSON, Datadog/generic CSV, Windows Event Log (CSV/XML), AWS CloudWatch JSON, or plain-text
       </div>
 
       <div class="cards" id="summary-cards" style="display:none">
@@ -730,8 +730,14 @@ let _errorsData   = null;
 // Datadog CSV logs map Service→"container" and Host→"pod" internally so the
 // existing GKE-oriented endpoints work unchanged; these swap the on-screen
 // labels back to what a Datadog user actually recognizes.
-function containerLabel() { return state.format === 'datadog_csv' ? 'Service' : 'Container'; }
-function podLabel()       { return state.format === 'datadog_csv' ? 'Host'    : 'Pod'; }
+const _FORMAT_LABELS = {
+  csv:                { container: 'Service',   pod: 'Host' },
+  windows_event_csv:  { container: 'Source',    pod: 'Computer' },
+  windows_event_xml:  { container: 'Source',    pod: 'Computer' },
+  cloudwatch_json:    { container: 'Log Group', pod: 'Log Stream' },
+};
+function containerLabel() { return (_FORMAT_LABELS[state.format] || {}).container || 'Container'; }
+function podLabel()       { return (_FORMAT_LABELS[state.format] || {}).pod       || 'Pod'; }
 
 function applyFieldLabels() {
   const hdr = document.getElementById('lbl-containers-hdr');
