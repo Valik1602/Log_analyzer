@@ -1,4 +1,4 @@
-# GKE Log Analyzer
+#Log Analyzer
 
 Local web app for analyzing logs from the formats L2/L3 support engineers actually run into day to day — GKE JSON, Datadog CSV, generic/arbitrary CSV, Windows Event Log (CSV or XML export), AWS CloudWatch Logs (JSON export), and plain-text application logs — trace request chains, browse errors with context, filter by severity/service/time, and search by UUID, email, or free text.
 
